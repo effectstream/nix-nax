@@ -1,0 +1,128 @@
+1
+00:00:00,000 --> 00:00:03,233
+This is a tic-tac-toe game on the Midnight
+blockchain.
+
+2
+00:00:03,233 --> 00:00:04,969
+But it plays at memory speed.
+
+3
+00:00:05,600 --> 00:00:09,274
+Normally, every move would be a separate
+blockchain transaction.
+
+4
+00:00:09,274 --> 00:00:11,455
+That's about twenty-five seconds each.
+
+5
+00:00:11,455 --> 00:00:13,866
+A nine-move game would take three minutes.
+
+6
+00:00:15,000 --> 00:00:17,383
+Instead, we move the gameplay off-chain.
+
+7
+00:00:17,383 --> 00:00:20,244
+On the left, player X is deploying the
+contract.
+
+8
+00:00:20,244 --> 00:00:25,726
+They submit only their own Merkle root — a
+commitment to all the moves they might
+ever make.
+
+9
+00:00:25,726 --> 00:00:28,050
+The channel opens in a half-open state.
+
+10
+00:00:30,000 --> 00:00:36,333
+On the right, player O pastes the contract
+address and submits their own commitments
+from their own browser.
+
+11
+00:00:36,333 --> 00:00:38,268
+Two transactions, one per player.
+
+12
+00:00:38,268 --> 00:00:41,317
+Neither side can substitute the other's
+commitments.
+
+13
+00:00:41,317 --> 00:00:42,725
+The channel is now live.
+
+14
+00:00:44,000 --> 00:00:45,958
+From here, the chain goes quiet.
+
+15
+00:00:45,958 --> 00:00:50,426
+Each move goes over a WebSocket — the
+mover reveals one Merkle-tree leaf,
+
+16
+00:00:50,426 --> 00:00:53,242
+and the opponent verifies it against the
+root.
+
+17
+00:00:54,000 --> 00:00:57,055
+X completes the diagonal. The local game
+ends.
+
+18
+00:00:57,055 --> 00:00:59,512
+Now X submits one settle transaction.
+
+19
+00:00:59,512 --> 00:01:06,218
+The contract replays every move and
+verifies every token's Merkle path under
+the right player's root.
+
+20
+00:01:06,218 --> 00:01:08,211
+One proof, for the whole game.
+
+21
+00:01:13,000 --> 00:01:13,855
+Settle lands.
+
+22
+00:01:13,855 --> 00:01:17,998
+The chain now records five committed turns
+and X as the winner.
+
+23
+00:01:17,998 --> 00:01:24,378
+A short challenge window opens — during
+which a longer, valid history could
+override this result.
+
+24
+00:01:25,000 --> 00:01:26,396
+The window expires.
+
+25
+00:01:26,396 --> 00:01:27,865
+X claims the result.
+
+26
+00:01:27,865 --> 00:01:29,040
+Status: settled.
+
+27
+00:01:29,500 --> 00:01:31,579
+One game. Four chain transactions.
+
+28
+00:01:31,579 --> 00:01:33,169
+The rest, at memory speed.
+
