@@ -1,0 +1,1 @@
+On the right, player O pastes the contract address and submits their own commitments from their own browser. Two transactions, one per player. Neither side can substitute the other's commitments. The channel is now live.

@@ -1,0 +1,1 @@
+Settle lands. The chain now records five committed turns and X as the winner. A short challenge window opens — during which a longer, valid history could override this result.
