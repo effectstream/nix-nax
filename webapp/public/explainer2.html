@@ -1,0 +1,708 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Tic-Tac-Toe channel — live state visualiser</title>
+<style>
+:root {
+  color-scheme: dark;
+  --bg-0: #0b1320;
+  --bg-1: #142036;
+  --bg-2: #1e3050;
+  --bg-3: #25406b;
+  --border: #314368;
+  --fg-0: #e7eef8;
+  --fg-1: #98a8c4;
+  --fg-2: #6b7e9c;
+  --accent: #5dd0c4;
+  --accent-dim: rgba(93, 208, 196, 0.18);
+  --x: #ff8d8d;
+  --x-dim: rgba(255, 141, 141, 0.18);
+  --x-secret: rgba(255, 141, 141, 0.06);
+  --o: #80b4ff;
+  --o-dim: rgba(128, 180, 255, 0.18);
+  --o-secret: rgba(128, 180, 255, 0.06);
+  --good: #54e09a;
+  --warn: #ffd479;
+  --bad: #ff7a7a;
+  --code: #1a2742;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0; min-height: 100vh;
+  background: linear-gradient(180deg, var(--bg-0), var(--bg-1));
+  color: var(--fg-0);
+  font-size: 14.5px;
+}
+.layout {
+  max-width: 1480px;
+  margin: 0 auto;
+  padding: 20px 28px 40px;
+}
+header {
+  display: flex; align-items: flex-end; gap: 18px; justify-content: space-between;
+  margin-bottom: 18px;
+  flex-wrap: wrap;
+}
+header h1 { font-size: 24px; margin: 0; letter-spacing: -0.3px; }
+header h1 .gradient {
+  background: linear-gradient(135deg, var(--accent), #80b4ff);
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+}
+header p { font-size: 13px; color: var(--fg-1); margin: 0; max-width: 720px; }
+
+/* Top control row */
+.controls {
+  display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+  padding: 12px 14px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-bottom: 16px;
+}
+.controls .kicker { color: var(--fg-2); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; margin-right: 4px; }
+.view-toggle button { padding: 5px 10px; font-size: 12px; }
+.view-toggle button.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+
+/* Two-column main grid */
+.split {
+  display: grid;
+  grid-template-columns: 360px 1fr;
+  gap: 18px;
+}
+@media (max-width: 1080px) {
+  .split { grid-template-columns: 1fr; }
+}
+
+.card {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 18px;
+}
+.card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--accent); margin: 0 0 10px; font-weight: 700; }
+.card + .card { margin-top: 14px; }
+
+button {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  color: var(--fg-0);
+  font-size: 13px;
+  padding: 7px 14px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.12s ease, border-color 0.12s ease, transform 0.04s ease;
+}
+button:hover:not(:disabled) { background: var(--bg-3); border-color: #3d567c; }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+button.primary { background: linear-gradient(180deg, #2c8c80, #1f6f66); border-color: #2fa092; }
+button.bad     { background: #5e1f1f; border-color: #c95151; }
+button.warn    { background: #5a3b13; border-color: #ad7a30; }
+
+/* ── Board ────────────────────────────────────────────────────────────── */
+.board {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  width: 280px;
+  margin: 0 auto;
+}
+.board .cell {
+  aspect-ratio: 1 / 1;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 48px; font-weight: 700;
+  user-select: none;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.25s ease;
+}
+.board .cell:hover:not(.disabled):not(.filled) { background: #284067; }
+.board .cell.disabled, .board .cell.filled { cursor: default; }
+.board .cell.x { color: var(--x); background: rgba(255, 141, 141, 0.08); }
+.board .cell.o { color: var(--o); background: rgba(128, 180, 255, 0.08); }
+.board .cell.placed { animation: pop 0.35s ease; }
+@keyframes pop {
+  0%   { transform: scale(0.4); opacity: 0; }
+  50%  { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.turn-info {
+  text-align: center;
+  font-size: 13px;
+  margin-top: 12px;
+  color: var(--fg-1);
+}
+.tag {
+  display: inline-block; padding: 2px 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px;
+  vertical-align: middle;
+}
+.tag.x    { background: var(--x-dim); color: var(--x); }
+.tag.o    { background: var(--o-dim); color: var(--o); }
+.tag.good { background: rgba(84, 224, 154, 0.18); color: var(--good); }
+.tag.warn { background: rgba(255, 212, 121, 0.18); color: var(--warn); }
+.tag.bad  { background: rgba(255, 122, 122, 0.18); color: var(--bad); }
+
+/* ── Tree grids ──────────────────────────────────────────────────────── */
+.trees-row {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+}
+@media (max-width: 860px) {
+  .trees-row { grid-template-columns: 1fr; }
+}
+.tree-wrap h3 { display: flex; align-items: center; gap: 8px; }
+.tree-wrap.x h3 { color: var(--x); }
+.tree-wrap.o h3 { color: var(--o); }
+
+.tree-grid {
+  display: grid;
+  grid-template-columns: 18px repeat(9, 1fr);
+  grid-template-rows: 14px repeat(9, 26px);
+  gap: 2px;
+  font-family: ui-monospace, monospace;
+}
+.tree-grid .col-label, .tree-grid .row-label {
+  font-size: 8.5px;
+  color: var(--fg-2);
+  display: flex; align-items: center; justify-content: center;
+}
+.tree-grid .col-label { align-items: flex-end; padding-bottom: 1px; }
+.tree-grid .row-label { padding-right: 2px; justify-content: flex-end; }
+.tree-grid .leaf {
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 8.5px;
+  position: relative;
+  transition: background 0.25s ease, border-color 0.25s ease, color 0.25s ease, transform 0.2s ease;
+  cursor: pointer;
+}
+/* X's tree leaves */
+.tree-wrap.x .leaf.secret { background: var(--x-secret); border-color: rgba(255,141,141,0.25); color: rgba(255,141,141,0.5); }
+.tree-wrap.x .leaf.revealed { background: var(--x-dim); border-color: var(--x); color: var(--x); }
+.tree-wrap.x .leaf.used { background: rgba(84, 224, 154, 0.15); border-color: var(--good); color: var(--good); font-weight: 700; }
+.tree-wrap.x .leaf.fraud { background: rgba(255, 122, 122, 0.3); border-color: var(--bad); color: var(--bad); animation: pulse 1.2s infinite; }
+.tree-wrap.x .leaf.opaque { background: var(--bg-2); border-color: var(--border); color: var(--fg-2); }
+.tree-wrap.x .leaf.wrong-turn { background: transparent; border-color: rgba(99, 113, 140, 0.2); color: var(--fg-2); opacity: 0.35; }
+/* O's tree leaves */
+.tree-wrap.o .leaf.secret { background: var(--o-secret); border-color: rgba(128,180,255,0.25); color: rgba(128,180,255,0.5); }
+.tree-wrap.o .leaf.revealed { background: var(--o-dim); border-color: var(--o); color: var(--o); }
+.tree-wrap.o .leaf.used { background: rgba(84, 224, 154, 0.15); border-color: var(--good); color: var(--good); font-weight: 700; }
+.tree-wrap.o .leaf.fraud { background: rgba(255, 122, 122, 0.3); border-color: var(--bad); color: var(--bad); animation: pulse 1.2s infinite; }
+.tree-wrap.o .leaf.opaque { background: var(--bg-2); border-color: var(--border); color: var(--fg-2); }
+.tree-wrap.o .leaf.wrong-turn { background: transparent; border-color: rgba(99, 113, 140, 0.2); color: var(--fg-2); opacity: 0.35; }
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 122, 122, 0.6); }
+  50%      { box-shadow: 0 0 0 4px rgba(255, 122, 122, 0); }
+}
+
+.legend {
+  display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--fg-1); margin-top: 8px;
+}
+.legend .sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: middle; margin-right: 4px; }
+
+/* ── Messages stream ─────────────────────────────────────────────────── */
+.msgs {
+  height: 220px; overflow-y: auto;
+  background: var(--code);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  display: flex; flex-direction: column; gap: 6px;
+  font-family: ui-monospace, monospace; font-size: 11.5px;
+}
+.msgs .ws-msg {
+  padding: 6px 9px; border-radius: 6px; border: 1px solid var(--border);
+  max-width: 90%;
+  animation: msgIn 0.3s ease;
+}
+.msgs .ws-msg.x { background: var(--x-dim); border-color: rgba(255,141,141,0.45); color: var(--x); align-self: flex-start; }
+.msgs .ws-msg.o { background: var(--o-dim); border-color: rgba(128,180,255,0.45); color: var(--o); align-self: flex-end; }
+.msgs .ws-msg.chain { background: var(--accent-dim); border-color: rgba(93,208,196,0.45); color: var(--accent); align-self: center; }
+.msgs .ws-msg.bad   { background: rgba(255,122,122,0.18); border-color: rgba(255,122,122,0.5); color: var(--bad); align-self: center; }
+@keyframes msgIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+/* ── Chain state ─────────────────────────────────────────────────────── */
+.chain-kvs {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  font-size: 12px;
+}
+.chain-kvs .k { color: var(--fg-1); }
+.chain-kvs .v { font-family: ui-monospace, monospace; word-break: break-all; }
+
+/* Inspector */
+.inspector {
+  background: var(--code);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-family: ui-monospace, monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  min-height: 84px;
+  color: var(--fg-0);
+}
+.inspector .lbl { color: var(--accent); }
+.inspector .dim { color: var(--fg-2); }
+</style>
+</head>
+<body>
+<div class="layout">
+
+  <header>
+    <div>
+      <h1>State channel — <span class="gradient">live state visualiser</span></h1>
+      <p>Play moves on the left. Watch each player's Merkle tree, the off-chain message stream, and the on-chain state update in real time. Toggle the perspective to see what only X knows, only O knows, or the god view.</p>
+    </div>
+  </header>
+
+  <div class="controls">
+    <span class="kicker">view as:</span>
+    <div class="view-toggle">
+      <button id="viewGod" class="active" onclick="setView('god')">god</button>
+      <button id="viewX"   onclick="setView('x')">X</button>
+      <button id="viewO"   onclick="setView('o')">O</button>
+    </div>
+    <span style="flex: 1;"></span>
+    <button class="primary" onclick="autoStep()" id="stepBtn">▶ next step</button>
+    <button class="warn" onclick="cheatStep()" id="cheatBtn">⚠ X equivocates @ turn 2</button>
+    <button onclick="settleStep()" id="settleBtn">⛓ submit settle</button>
+    <button class="bad" onclick="reset()">↻ reset</button>
+  </div>
+
+  <div class="split">
+
+    <!-- Left column: board + chain state + leaf inspector -->
+    <div>
+      <div class="card">
+        <h3>Game</h3>
+        <div id="board" class="board"></div>
+        <div class="turn-info" id="turnInfo">phase: pre-deploy</div>
+      </div>
+
+      <div class="card">
+        <h3>On-chain state</h3>
+        <div class="chain-kvs" id="chainKvs"></div>
+      </div>
+
+      <div class="card">
+        <h3>Leaf inspector</h3>
+        <div class="sub" style="font-size: 11px; color: var(--fg-2); margin-bottom: 8px;">click any leaf on the right →</div>
+        <div class="inspector" id="inspector"><span class="dim">click a leaf to see its preimage and status</span></div>
+      </div>
+    </div>
+
+    <!-- Right column: trees + messages -->
+    <div>
+      <div class="trees-row">
+        <div class="card tree-wrap x">
+          <h3>X's tree <span class="tag x" id="xUsedCount">0 used / 45 leaves</span></h3>
+          <div id="xGrid" class="tree-grid"></div>
+          <div class="legend">
+            <span><span class="sw" style="background: var(--x-secret); border:1px solid rgba(255,141,141,0.25);"></span>secret (X only)</span>
+            <span><span class="sw" style="background: var(--x-dim); border:1px solid var(--x);"></span>revealed</span>
+            <span><span class="sw" style="background: rgba(84,224,154,0.15); border:1px solid var(--good);"></span>used in valid move</span>
+            <span><span class="sw" style="background: rgba(255,122,122,0.3); border:1px solid var(--bad);"></span>equivocation</span>
+            <span><span class="sw" style="background: var(--bg-2); border:1px solid var(--border);"></span>opaque (other view)</span>
+          </div>
+        </div>
+
+        <div class="card tree-wrap o">
+          <h3>O's tree <span class="tag o" id="oUsedCount">0 used / 36 leaves</span></h3>
+          <div id="oGrid" class="tree-grid"></div>
+          <div class="legend">
+            <span><span class="sw" style="background: var(--o-secret); border:1px solid rgba(128,180,255,0.25);"></span>secret (O only)</span>
+            <span><span class="sw" style="background: var(--o-dim); border:1px solid var(--o);"></span>revealed</span>
+            <span><span class="sw" style="background: rgba(84,224,154,0.15); border:1px solid var(--good);"></span>used in valid move</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Off-chain message stream (WebSocket)</h3>
+        <div class="msgs" id="msgs"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Utility ──────────────────────────────────────────────────────────────
+const $ = (sel, r = document) => r.querySelector(sel);
+const $$ = (sel, r = document) => Array.from(r.querySelectorAll(sel));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const fakeHex = (seed, len = 4) => {
+  let h = 0; for (const c of seed) h = (h * 31 + c.charCodeAt(0)) & 0xffffffff;
+  const out = [];
+  for (let i = 0; i < len; i++) {
+    h = (h * 2654435761 + 0x9e3779b1) & 0xffffffff;
+    out.push(((h >>> 24) & 0xff).toString(16).padStart(2, "0"));
+  }
+  return out.join("");
+};
+const idFor   = (role) => fakeHex(`id:${role}`, 16);
+const rootFor = (role) => "0x" + fakeHex(`root:${role}`, 16);
+const leafHash = (role, t, c) => fakeHex(`${role}:l:${t}:${c}`, 4);
+const secretHex = (role, t, c) => fakeHex(`${role}:s:${t}:${c}`, 16);
+
+const SCRIPT_PLAY = [
+  { who: "x", cell: 0 },
+  { who: "o", cell: 3 },
+  { who: "x", cell: 1 },
+  { who: "o", cell: 4 },
+  { who: "x", cell: 2 },
+];
+
+// ── State ────────────────────────────────────────────────────────────────
+let state;
+function freshState() {
+  return {
+    phase: "pre-deploy", // pre-deploy → halfOpen → inProgress → settled
+    board: [0,0,0,0,0,0,0,0,0],
+    nextTurn: 0,
+    // For each player + each (turn, cell): 'secret', 'revealed', 'used', 'fraud'
+    revealed: { x: new Set(), o: new Set() }, // keys like "t-c"
+    used:     { x: new Set(), o: new Set() },
+    fraud:    { x: new Set(), o: new Set() },
+    chain: {
+      status: "—",
+      idX: "—", idO: "—",
+      rootX: "—", rootO: "—",
+      committedTurns: 0,
+      winner: "—",
+    },
+    msgs: [],
+    view: "god",
+    selectedLeaf: null,
+    settleStep: 0, // 0 = pre-deploy, 1 = X deployed, 2 = O joined, 3 = settled
+  };
+}
+state = freshState();
+
+// ── Rendering ────────────────────────────────────────────────────────────
+function render() {
+  renderBoard();
+  renderTrees();
+  renderChain();
+  renderInfo();
+  renderInspector();
+  renderUsedCounts();
+  updateButtons();
+}
+
+function renderBoard() {
+  const el = $("#board"); el.innerHTML = "";
+  for (let i = 0; i < 9; i++) {
+    const c = document.createElement("div");
+    c.className = "cell";
+    const v = state.board[i];
+    if (v === 1) { c.classList.add("x", "placed", "filled"); c.textContent = "X"; }
+    else if (v === 2) { c.classList.add("o", "placed", "filled"); c.textContent = "O"; }
+    else if (state.phase !== "inProgress") c.classList.add("disabled");
+    c.onclick = () => onCellClick(i);
+    el.appendChild(c);
+  }
+}
+
+function leafStatus(role, t, c) {
+  const key = `${t}-${c}`;
+  if (state.fraud[role].has(key)) return "fraud";
+  if (state.used[role].has(key)) return "used";
+  if (state.revealed[role].has(key)) return "revealed";
+  return "secret";
+}
+function isWrongTurnFor(role, t) {
+  // X plays even turns; O plays odd turns. Mark "wrong" turns as inert.
+  return role === "x" ? (t % 2 !== 0) : (t % 2 !== 1);
+}
+
+function renderTrees() {
+  for (const role of ["x", "o"]) {
+    const grid = $(`#${role}Grid`);
+    grid.innerHTML = "";
+    // Corner spacer + column labels
+    grid.appendChild(blank("col-label"));
+    for (let c = 0; c < 9; c++) grid.appendChild(label("col-label", `c${c}`));
+    for (let t = 0; t < 9; t++) {
+      grid.appendChild(label("row-label", `t${t}`));
+      for (let c = 0; c < 9; c++) {
+        const el = document.createElement("div");
+        el.className = "leaf";
+        el.dataset.role = role;
+        el.dataset.t = t;
+        el.dataset.c = c;
+
+        const status = leafStatus(role, t, c);
+        const wrongTurn = isWrongTurnFor(role, t);
+
+        // Apply visibility rules based on view perspective.
+        // Default: god sees everything; X-view hides O's secrets (opaque); O-view hides X's secrets.
+        let visualStatus = status;
+        if (wrongTurn) visualStatus = "wrong-turn";
+        else if (state.view !== "god" && state.view !== role) {
+          // Other player's tree: only "revealed/used/fraud" are visible.
+          if (status === "secret") visualStatus = "opaque";
+        }
+
+        el.classList.add(visualStatus);
+        // Show hex hash for everything except opaque + wrong-turn.
+        if (visualStatus !== "opaque" && visualStatus !== "wrong-turn") {
+          el.textContent = leafHash(role, t, c);
+        } else if (visualStatus === "opaque") {
+          el.textContent = "·";
+        } else {
+          el.textContent = "";
+        }
+        if (state.selectedLeaf?.role === role && state.selectedLeaf?.t === t && state.selectedLeaf?.c === c) {
+          el.style.outline = "2px solid var(--accent)";
+          el.style.transform = "scale(1.15)";
+        }
+        el.onclick = () => selectLeaf(role, t, c);
+        grid.appendChild(el);
+      }
+    }
+  }
+}
+function blank(cls) { const d = document.createElement("div"); d.className = cls; return d; }
+function label(cls, txt) { const d = document.createElement("div"); d.className = cls; d.textContent = txt; return d; }
+
+function renderChain() {
+  const c = state.chain;
+  $("#chainKvs").innerHTML = `
+    <div class="k">status</div>          <div class="v">${tagFor(c.status)}</div>
+    <div class="k">idX</div>             <div class="v">${truncate(c.idX, 12)}</div>
+    <div class="k">idO</div>             <div class="v">${truncate(c.idO, 12)}</div>
+    <div class="k">rootX</div>           <div class="v">${truncate(c.rootX, 12)}</div>
+    <div class="k">rootO</div>           <div class="v">${truncate(c.rootO, 12)}</div>
+    <div class="k">committedTurns</div>  <div class="v">${c.committedTurns}</div>
+    <div class="k">winner</div>          <div class="v">${winnerTag(c.winner)}</div>
+  `;
+}
+function tagFor(s) {
+  if (s === "halfOpen")   return `<span class="tag warn">halfOpen</span>`;
+  if (s === "inProgress") return `<span class="tag good">inProgress</span>`;
+  if (s === "settled")    return `<span class="tag good">settled</span>`;
+  return `<span style="color: var(--fg-2);">${s}</span>`;
+}
+function winnerTag(w) {
+  if (w === "x") return `<span class="tag x">winner: X</span>`;
+  if (w === "o") return `<span class="tag o">winner: O</span>`;
+  if (w === "draw") return `<span class="tag warn">draw</span>`;
+  return `<span style="color: var(--fg-2);">${w}</span>`;
+}
+function truncate(s, n) { if (typeof s !== "string" || s.length <= n) return s; return s.slice(0, n) + "…"; }
+
+function renderInfo() {
+  const phase = state.phase;
+  const info = $("#turnInfo");
+  if (phase === "pre-deploy") {
+    info.innerHTML = `phase: <strong>pre-deploy</strong> · trees exist in browsers, chain knows nothing yet. Press <em>next step</em>.`;
+  } else if (phase === "halfOpen") {
+    info.innerHTML = `phase: <span class="tag warn">halfOpen</span> · X deployed. Waiting for O to join.`;
+  } else if (phase === "inProgress" && state.nextTurn < SCRIPT_PLAY.length) {
+    const who = SCRIPT_PLAY[state.nextTurn].who.toUpperCase();
+    info.innerHTML = `turn ${state.nextTurn} · <strong>${who}</strong> to move`;
+  } else if (phase === "inProgress") {
+    info.innerHTML = `local game over · ready to settle on chain`;
+  } else if (phase === "settled") {
+    info.innerHTML = `phase: <span class="tag good">settled</span>`;
+  }
+}
+
+function renderInspector() {
+  const el = $("#inspector");
+  if (!state.selectedLeaf) { el.innerHTML = `<span class="dim">click a leaf to see its preimage and status</span>`; return; }
+  const { role, t, c } = state.selectedLeaf;
+  const wrong = isWrongTurnFor(role, t);
+  if (wrong) {
+    el.innerHTML = `<span class="dim">// turn ${t} doesn't belong to ${role.toUpperCase()}\n// ${role === "x" ? "X" : "O"} plays ${role === "x" ? "even" : "odd"} turns only</span>`;
+    return;
+  }
+  const status = leafStatus(role, t, c);
+  const visible = state.view === "god" || state.view === role || status !== "secret";
+  if (!visible) {
+    el.innerHTML = `<span class="dim">// from ${state.view.toUpperCase()}'s view, this leaf is opaque\n// (only ${role.toUpperCase()} knows the secret)</span>`;
+    return;
+  }
+  let body = `<span class="lbl">leaf (turn ${t}, cell ${c})</span>\n  preimage:\n`;
+  body += `    domainSep: "ttt:otk:"\n`;
+  body += `    turn:      ${t}\n`;
+  body += `    cell:      ${c}\n`;
+  body += `    secret:    0x${secretHex(role, t, c)}…\n`;
+  body += `\n  leaf hash =\n`;
+  body += `    persistentHash(...)\n`;
+  body += `    = 0x${leafHash(role, t, c)}…\n\n`;
+  body += `  status:    `;
+  if (status === "fraud")    body += `<span style="color: var(--bad);">EQUIVOCATION — also revealed for another cell this turn</span>`;
+  else if (status === "used")     body += `<span style="color: var(--good);">used in a SignedMove and verified by opponent</span>`;
+  else if (status === "revealed") body += `<span style="color: var(--accent);">revealed (token public)</span>`;
+  else                             body += `<span class="dim">secret (only ${role.toUpperCase()} knows)</span>`;
+  el.innerHTML = body;
+}
+
+function renderUsedCounts() {
+  const xUsed = state.used.x.size;
+  const oUsed = state.used.o.size;
+  $("#xUsedCount").textContent = `${xUsed} used / 45 (turns 0,2,4,6,8)`;
+  $("#oUsedCount").textContent = `${oUsed} used / 36 (turns 1,3,5,7)`;
+}
+
+function updateButtons() {
+  const ph = state.phase;
+  const canStep =
+    (ph === "pre-deploy") ||
+    (ph === "halfOpen") ||
+    (ph === "inProgress" && state.nextTurn < SCRIPT_PLAY.length);
+  $("#stepBtn").disabled = !canStep;
+  $("#stepBtn").textContent =
+    ph === "pre-deploy" ? "▶ deploy (X opens — phase 1)" :
+    ph === "halfOpen"   ? "▶ joinChannel (O joins — phase 2)" :
+    state.nextTurn < SCRIPT_PLAY.length ? `▶ play turn ${state.nextTurn} (${SCRIPT_PLAY[state.nextTurn].who.toUpperCase()})` :
+    "▶ all moves played";
+
+  $("#cheatBtn").disabled = ph !== "inProgress" || state.nextTurn < 3;
+  $("#settleBtn").disabled = ph !== "inProgress" || state.nextTurn === 0;
+  if (ph === "settled") {
+    $("#stepBtn").textContent = "▶ all done";
+    $("#stepBtn").disabled = true;
+  }
+}
+
+// ── Message stream ──────────────────────────────────────────────────────
+function pushMsg(kind, html) {
+  const el = $("#msgs");
+  const d = document.createElement("div");
+  d.className = `ws-msg ${kind}`;
+  d.innerHTML = html;
+  el.appendChild(d);
+  el.scrollTop = el.scrollHeight;
+  state.msgs.push({ kind, html });
+}
+
+// ── Step machinery ──────────────────────────────────────────────────────
+function autoStep() {
+  if (state.phase === "pre-deploy") return doDeploy();
+  if (state.phase === "halfOpen")   return doJoin();
+  if (state.phase === "inProgress" && state.nextTurn < SCRIPT_PLAY.length) return doMove(SCRIPT_PLAY[state.nextTurn]);
+}
+
+function doDeploy() {
+  state.phase = "halfOpen";
+  state.chain.status = "halfOpen";
+  state.chain.idX = "0x" + idFor("x");
+  state.chain.rootX = rootFor("x");
+  pushMsg("chain", `⛓ X submits <code>deploy(idX, rootX)</code> → contract state = halfOpen`);
+  render();
+}
+function doJoin() {
+  state.phase = "inProgress";
+  state.chain.status = "inProgress";
+  state.chain.idO = "0x" + idFor("o");
+  state.chain.rootO = rootFor("o");
+  pushMsg("chain", `⛓ O submits <code>joinChannel(idO, rootO)</code> → contract state = inProgress`);
+  render();
+}
+function doMove(m) {
+  const t = state.nextTurn;
+  const mark = m.who === "x" ? 1 : 2;
+  state.board[m.cell] = mark;
+  state.revealed[m.who].add(`${t}-${m.cell}`);
+  state.used[m.who].add(`${t}-${m.cell}`);
+  state.nextTurn += 1;
+  pushMsg(m.who, `<strong>${m.who === "x" ? "X →" : "← O"}</strong>&nbsp; SignedMove { turn: ${t}, cell: ${m.cell}, token.secret: 0x${secretHex(m.who, t, m.cell).slice(0, 8)}… }`);
+  const won = detectWinner(state.board);
+  if (won) {
+    if (won === "draw") pushMsg("chain", `🏁 draw — off-chain game over`);
+    else pushMsg("chain", `🏁 <strong>${won.toUpperCase()} wins</strong> — off-chain game over`);
+  }
+  render();
+}
+
+function cheatStep() {
+  // X reveals a SECOND token for turn 2 at a different cell.
+  const cheatT = 2, cheatC = 7;
+  if (state.fraud.x.has(`${cheatT}-${cheatC}`)) return;
+  state.revealed.x.add(`${cheatT}-${cheatC}`);
+  state.fraud.x.add(`${cheatT}-${cheatC}`);
+  // Also mark the originally-played turn-2 leaf as fraud for visual.
+  state.fraud.x.add(`2-1`); // X's real turn-2 play was cell 1 in the script
+  pushMsg("bad", `⚠ X equivocates — sends a second turn-2 token for cell ${cheatC}`);
+  pushMsg("o",   `← O detects two turn-2 tokens under rootX → calls <code>proveEquivocationByX</code>`);
+  state.chain.winner = "o";
+  state.chain.status = "settled";
+  state.phase = "settled";
+  pushMsg("chain", `⛓ <strong>fraud proof accepted</strong> · winner = O · status = settled`);
+  render();
+}
+
+function settleStep() {
+  if (state.phase !== "inProgress" || state.nextTurn === 0) return;
+  state.chain.committedTurns = state.nextTurn;
+  // Mark all played leaves as "used" (they already are).
+  const won = detectWinner(state.board);
+  state.chain.winner = won || "none";
+  state.chain.status = "settled";
+  state.phase = "settled";
+  pushMsg("chain", `⛓ settle(nMoves=${state.nextTurn}, …) → committedTurns = ${state.nextTurn}, winner = ${(won ?? "none").toUpperCase()}`);
+  pushMsg("chain", `⛓ claimResult() → status = settled`);
+  render();
+}
+
+function reset() {
+  state = freshState();
+  $("#msgs").innerHTML = "";
+  render();
+}
+
+function onCellClick(cell) {
+  if (state.phase !== "inProgress") return;
+  if (state.nextTurn >= SCRIPT_PLAY.length) return;
+  const expected = SCRIPT_PLAY[state.nextTurn];
+  if (cell !== expected.cell) {
+    pushMsg("bad", `note: scripted demo expects ${expected.who.toUpperCase()} to play cell ${expected.cell}; you clicked ${cell}.`);
+    return;
+  }
+  doMove(expected);
+}
+
+function selectLeaf(role, t, c) {
+  state.selectedLeaf = { role, t, c };
+  renderTrees();
+  renderInspector();
+}
+
+function setView(v) {
+  state.view = v;
+  ["god", "x", "o"].forEach((k) => $(`#view${k.charAt(0).toUpperCase() + k.slice(1)}`).classList.toggle("active", v === k));
+  render();
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────
+const WIN_LINES = [
+  [0,1,2],[3,4,5],[6,7,8],
+  [0,3,6],[1,4,7],[2,5,8],
+  [0,4,8],[2,4,6],
+];
+function detectWinner(board) {
+  for (const [a, b, c] of WIN_LINES) {
+    if (board[a] && board[a] === board[b] && board[b] === board[c]) return board[a] === 1 ? "x" : "o";
+  }
+  return board.every((v) => v !== 0) ? "draw" : null;
+}
+
+// ── Boot ─────────────────────────────────────────────────────────────────
+render();
+pushMsg("chain", `welcome — both players have generated their token trees locally. press ▶ to begin.`);
+
+</script>
+</body>
+</html>

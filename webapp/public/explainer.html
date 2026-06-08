@@ -1,0 +1,1355 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Tic-Tac-Toe on Midnight — how it works</title>
+<style>
+:root {
+  color-scheme: dark;
+  --bg-0: #0b1320;
+  --bg-1: #142036;
+  --bg-2: #1e3050;
+  --bg-3: #25406b;
+  --border: #314368;
+  --fg-0: #e7eef8;
+  --fg-1: #98a8c4;
+  --fg-2: #6b7e9c;
+  --accent: #5dd0c4;
+  --accent-dim: rgba(93, 208, 196, 0.18);
+  --x: #ff8d8d;
+  --x-dim: rgba(255, 141, 141, 0.18);
+  --o: #80b4ff;
+  --o-dim: rgba(128, 180, 255, 0.18);
+  --good: #54e09a;
+  --warn: #ffd479;
+  --bad: #ff7a7a;
+  --code: #1a2742;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0; height: 100%; overflow: hidden;
+  background: radial-gradient(circle at 50% 100%, #15233e, var(--bg-0));
+  color: var(--fg-0);
+  font-size: 18px;
+  line-height: 1.55;
+}
+.deck {
+  position: relative;
+  width: 100vw; height: 100vh;
+  overflow: hidden;
+}
+.slide {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 64px 80px 96px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(40px);
+  transition: opacity 0.45s cubic-bezier(.4,0,.2,1), transform 0.45s cubic-bezier(.4,0,.2,1);
+  will-change: opacity, transform;
+}
+.slide.active { opacity: 1; pointer-events: auto; transform: translateX(0); }
+.slide.prev { transform: translateX(-40px); }
+@media (max-width: 720px) {
+  .slide { padding: 32px 24px 88px; }
+  body { font-size: 16px; }
+}
+
+/* ── Step reveals (within a slide) ─────────────────────────────────────── */
+.step {
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.45s ease, transform 0.45s ease;
+  transition-delay: var(--delay, 0s);
+}
+.slide.active .step.visible { opacity: 1; transform: translateY(0); }
+
+/* ── Typography ───────────────────────────────────────────────────────── */
+h1.title { font-size: 56px; line-height: 1.05; margin: 0; letter-spacing: -1px; text-align: center; }
+h1.title .gradient {
+  background: linear-gradient(135deg, var(--accent), #80b4ff);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+h2 {
+  font-size: 36px; line-height: 1.1;
+  margin: 0 0 24px;
+  letter-spacing: -0.4px;
+  max-width: 980px; text-align: center;
+}
+h3 {
+  font-size: 14px; text-transform: uppercase; letter-spacing: 1.4px;
+  color: var(--accent); font-weight: 700; margin: 0 0 8px;
+}
+.lead { font-size: 22px; color: var(--fg-1); max-width: 760px; text-align: center; margin: 0 0 28px; }
+.sub { font-size: 14px; color: var(--fg-2); }
+.kicker { font-size: 13px; color: var(--accent); text-transform: uppercase; letter-spacing: 1.6px; font-weight: 700; }
+code, .mono { font-family: ui-monospace, "JetBrains Mono", "SF Mono", monospace; font-size: 0.92em; }
+
+/* ── Cards ────────────────────────────────────────────────────────────── */
+.card {
+  background: rgba(20, 32, 54, 0.7);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px 24px;
+}
+.card.glow { box-shadow: 0 6px 32px rgba(93, 208, 196, 0.12); border-color: rgba(93, 208, 196, 0.4); }
+.cols2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: stretch; }
+.cols3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+@media (max-width: 820px) { .cols2, .cols3 { grid-template-columns: 1fr; } }
+
+/* ── Tags ─────────────────────────────────────────────────────────────── */
+.tag {
+  display: inline-block; padding: 2px 10px; border-radius: 999px;
+  font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px;
+  vertical-align: middle;
+}
+.tag.x    { background: var(--x-dim); color: var(--x); }
+.tag.o    { background: var(--o-dim); color: var(--o); }
+.tag.good { background: rgba(84, 224, 154, 0.18); color: var(--good); }
+.tag.warn { background: rgba(255, 212, 121, 0.18); color: var(--warn); }
+.tag.bad  { background: rgba(255, 122, 122, 0.18); color: var(--bad); }
+.tag.lg { font-size: 14px; padding: 5px 14px; }
+
+/* ── Code ─────────────────────────────────────────────────────────────── */
+.code {
+  background: var(--code);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-family: ui-monospace, monospace;
+  font-size: 13.5px;
+  line-height: 1.6;
+  white-space: pre;
+  color: #d6e1f5;
+  overflow-x: auto;
+}
+.code .k { color: var(--accent); }
+.code .s { color: var(--warn); }
+.code .n { color: var(--o); }
+.code .c { color: var(--fg-2); font-style: italic; }
+
+/* ── Buttons ──────────────────────────────────────────────────────────── */
+button {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  color: var(--fg-0);
+  font-size: 14px;
+  padding: 9px 18px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, transform 0.04s ease;
+  font-family: inherit;
+}
+button:hover { background: var(--bg-3); border-color: #3d567c; }
+button.primary { background: linear-gradient(180deg, #2c8c80, #1f6f66); border-color: #2fa092; }
+button.bad     { background: #5e1f1f; border-color: #c95151; }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+button:active:not(:disabled) { transform: translateY(1px); }
+
+/* ── Navigation ───────────────────────────────────────────────────────── */
+.nav {
+  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 16px;
+  z-index: 100;
+}
+.dots { display: flex; gap: 6px; }
+.dots .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--bg-3); border: 1px solid var(--border);
+  transition: all 0.3s ease;
+  cursor: pointer;
+}
+.dots .dot.active { background: var(--accent); border-color: var(--accent); transform: scale(1.4); }
+.dots .dot.visited { background: rgba(93, 208, 196, 0.4); }
+.nav button { padding: 6px 14px; font-size: 13px; }
+.slide-counter { color: var(--fg-2); font-size: 12px; font-variant-numeric: tabular-nums; min-width: 60px; text-align: center; }
+
+/* ── Hint at bottom-right ─────────────────────────────────────────────── */
+.hint {
+  position: fixed; bottom: 20px; right: 24px;
+  color: var(--fg-2); font-size: 11px; letter-spacing: 0.5px;
+  text-align: right; z-index: 100;
+}
+.hint .key {
+  display: inline-block; padding: 1px 6px; border: 1px solid var(--border);
+  border-radius: 4px; background: var(--bg-1); font-family: ui-monospace, monospace;
+  font-size: 11px; margin: 0 2px;
+}
+
+/* ── Boards ───────────────────────────────────────────────────────────── */
+.board {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 7px;
+  width: 240px;
+}
+.board.sm { width: 150px; gap: 5px; }
+.cell {
+  aspect-ratio: 1 / 1;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 44px; font-weight: 700;
+  user-select: none;
+  transition: background 0.2s ease, border-color 0.2s ease, transform 0.25s ease;
+}
+.board.sm .cell { font-size: 26px; border-radius: 6px; }
+.cell.x { color: var(--x); background: rgba(255, 141, 141, 0.08); }
+.cell.o { color: var(--o); background: rgba(128, 180, 255, 0.08); }
+.cell.placed { animation: pop 0.4s ease; }
+.cell.target { outline: 2px dashed var(--accent); outline-offset: -3px; }
+.cell.fraud { outline: 2px solid var(--bad); outline-offset: -3px; animation: pulse 1.2s infinite; }
+@keyframes pop {
+  0%   { transform: scale(0.4); opacity: 0; }
+  50%  { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 122, 122, 0.6); }
+  50%      { box-shadow: 0 0 0 12px rgba(255, 122, 122, 0); }
+}
+
+/* ── Big numbers ──────────────────────────────────────────────────────── */
+.bignum {
+  font-size: 86px; font-weight: 800; line-height: 1; letter-spacing: -3px;
+  background: linear-gradient(135deg, var(--accent), #80b4ff);
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  font-variant-numeric: tabular-nums;
+}
+.bignum.bad {
+  background: linear-gradient(135deg, var(--bad), #ffb37a);
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+}
+
+/* ── Tree visual ──────────────────────────────────────────────────────── */
+.tree {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  font-family: ui-monospace, monospace; font-size: 11px;
+}
+.tree .level { display: flex; gap: 5px; justify-content: center; flex-wrap: wrap; }
+.tree .node {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 4px 8px;
+  min-width: 64px;
+  text-align: center;
+  color: var(--fg-1);
+  font-size: 10px;
+  transition: background 0.4s ease, border-color 0.4s ease, color 0.4s ease, transform 0.4s ease;
+}
+.tree .node.appear { animation: nodePop 0.5s ease forwards; }
+@keyframes nodePop {
+  from { opacity: 0; transform: translateY(-10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.tree .node.on-path { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); transform: scale(1.05); }
+.tree .node.is-leaf  { background: var(--x-dim); border-color: var(--x); color: var(--x); transform: scale(1.05); }
+.tree .node.sibling  { background: rgba(255, 212, 121, 0.18); border-color: var(--warn); color: var(--warn); }
+.tree .node.root     { background: linear-gradient(180deg, #2c8c80, #1f6f66); border-color: #2fa092; color: var(--bg-0); font-weight: 700; min-width: 90px; }
+
+/* ── Arrows + flow ────────────────────────────────────────────────────── */
+.arrow-row { display: flex; align-items: center; gap: 14px; }
+.arrow {
+  display: inline-block; color: var(--accent); font-size: 20px; opacity: 0.7;
+  animation: arrowFloat 1.8s ease-in-out infinite;
+}
+@keyframes arrowFloat { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(6px); } }
+
+/* ── Timeline ─────────────────────────────────────────────────────────── */
+.timeline { width: 100%; max-width: 760px; }
+.timeline .row {
+  display: grid; grid-template-columns: 86px 1fr; gap: 16px;
+  padding: 10px 0; border-bottom: 1px solid var(--border);
+  opacity: 0; transform: translateY(8px); transition: opacity 0.5s ease, transform 0.5s ease;
+}
+.timeline .row.show { opacity: 1; transform: translateY(0); }
+.timeline .row:last-child { border-bottom: none; }
+.timeline .t { color: var(--fg-2); font-family: ui-monospace, monospace; font-size: 13px; }
+
+/* ── Off-chain ↔ on-chain split diagram ───────────────────────────────── */
+.split {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 0;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  width: 100%; max-width: 820px;
+}
+.split > div { padding: 24px 24px 22px; }
+.split > div + div { border-left: 1px solid var(--border); }
+.split h4 { margin: 0 0 12px; font-size: 14px; color: var(--fg-1); letter-spacing: 0.5px; text-transform: uppercase; }
+@media (max-width: 720px) {
+  .split { grid-template-columns: 1fr; }
+  .split > div + div { border-left: none; border-top: 1px solid var(--border); }
+}
+
+/* ── Players panel ────────────────────────────────────────────────────── */
+.players-panel {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 24px;
+  width: 100%; max-width: 900px;
+}
+.player-card {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px;
+}
+.player-card.x { border-color: rgba(255, 141, 141, 0.4); }
+.player-card.o { border-color: rgba(128, 180, 255, 0.4); }
+.player-card h4 { margin: 0 0 12px; font-size: 16px; }
+
+/* ── Animated proof gears ─────────────────────────────────────────────── */
+.proof-anim {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-family: ui-monospace, monospace; font-size: 14px;
+  color: var(--accent);
+}
+.spinner {
+  width: 14px; height: 14px; border-radius: 50%;
+  border: 2px solid rgba(93, 208, 196, 0.3);
+  border-top-color: var(--accent);
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Callouts ─────────────────────────────────────────────────────────── */
+.callout {
+  border: 1px solid var(--accent); background: rgba(93, 208, 196, 0.08);
+  border-radius: 10px; padding: 14px 18px; max-width: 760px;
+}
+.callout.bad  { border-color: var(--bad); background: rgba(255, 122, 122, 0.08); }
+.callout.warn { border-color: var(--warn); background: rgba(255, 212, 121, 0.06); }
+
+/* ── Move messages (chat-style WS arrows) ─────────────────────────────── */
+.ws-stream {
+  width: 100%; max-width: 700px; min-height: 260px;
+  display: flex; flex-direction: column; gap: 8px;
+  font-family: ui-monospace, monospace; font-size: 13px;
+}
+.ws-msg {
+  padding: 8px 12px; border-radius: 8px;
+  border: 1px solid var(--border);
+  opacity: 0; transform: translateY(6px);
+  animation: msgIn 0.4s ease forwards;
+}
+.ws-msg.x { background: var(--x-dim); border-color: rgba(255, 141, 141, 0.45); color: var(--x); align-self: flex-start; max-width: 80%; }
+.ws-msg.o { background: var(--o-dim); border-color: rgba(128, 180, 255, 0.45); color: var(--o); align-self: flex-end; max-width: 80%; }
+.ws-msg.chain { background: var(--accent-dim); border-color: rgba(93, 208, 196, 0.45); color: var(--accent); align-self: center; max-width: 80%; }
+@keyframes msgIn { to { opacity: 1; transform: translateY(0); } }
+
+/* ── Bytes/hash visualization ─────────────────────────────────────────── */
+.byterow {
+  display: flex; gap: 2px; flex-wrap: wrap;
+  font-family: ui-monospace, monospace; font-size: 10px;
+}
+.byterow .b {
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: 3px; padding: 1px 4px; color: var(--fg-1);
+}
+.byterow .b.lit { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="deck" id="deck">
+
+  <!-- ╔════════════════════ Slide 1: Title ════════════════════╗ -->
+  <section class="slide" data-slide="1">
+    <div class="step" data-step="0" style="text-align: center;">
+      <div class="kicker step" data-step="0">Midnight · state channels</div>
+      <h1 class="title step" data-step="1" style="--delay: 0.1s; margin-top: 12px;">
+        Tic-Tac-Toe<br><span class="gradient">on Midnight</span>
+      </h1>
+      <p class="lead step" data-step="2" style="--delay: 0.4s; margin-top: 24px;">
+        Two players. Off-chain at memory speed. On-chain with cryptographic anti-cheat.
+      </p>
+      <p class="step sub" data-step="3" style="--delay: 0.7s; margin-top: 32px;">
+        Press <span class="mono" style="padding: 2px 8px; border: 1px solid var(--border); border-radius: 4px;">→</span> or click anywhere to begin
+      </p>
+    </div>
+  </section>
+
+  <!-- ╔════════════════════ Slide 2: The problem ════════════════════╗ -->
+  <section class="slide" data-slide="2">
+    <h2 class="step" data-step="0">The problem (honest budget)</h2>
+    <p class="lead step" data-step="1" style="--delay: 0.1s;">
+      Midnight blocks finalize at <strong>~6 s</strong>. A ZK proof for a contract call takes another <strong>~20 s</strong>. So one move costs roughly <strong>25 s</strong>.
+    </p>
+    <div class="step" data-step="2" style="--delay: 0.3s; display: flex; gap: 30px; align-items: flex-start; margin-top: 16px; flex-wrap: wrap; justify-content: center;">
+
+      <!-- Naive column -->
+      <div style="text-align: center; min-width: 230px;">
+        <div class="kicker">Naive: 1 move = 1 tx</div>
+        <div class="bignum bad" id="naiveCounter" style="font-size: 64px;">0:00</div>
+        <div class="sub" style="margin-bottom: 12px;">total per 9-move game</div>
+        <div style="font-size: 12px; text-align: left; padding: 10px 14px; background: rgba(255, 122, 122, 0.06); border: 1px solid rgba(255, 122, 122, 0.3); border-radius: 8px; display: grid; grid-template-columns: 1fr auto; gap: 4px 14px;">
+          <span style="color: var(--fg-1);">deploy</span><span class="mono">~25 s</span>
+          <span style="color: var(--fg-1);">9 × on-chain move</span><span class="mono">~225 s</span>
+          <span style="color: var(--fg-1);">…no settlement</span><span class="mono">—</span>
+          <span style="border-top: 1px solid var(--border); padding-top: 4px;"><strong>total</strong></span>
+          <span class="mono" style="border-top: 1px solid var(--border); padding-top: 4px; color: var(--bad);"><strong>~250 s</strong></span>
+        </div>
+      </div>
+
+      <div class="arrow" style="margin-top: 60px;">→</div>
+
+      <!-- State channel column -->
+      <div style="text-align: center; min-width: 270px;">
+        <div class="kicker" style="color: var(--accent);">State channel (real time)</div>
+        <div class="bignum" id="channelCounter" style="font-size: 64px;">0:00</div>
+        <div class="sub" style="margin-bottom: 12px;">total per 9-move game</div>
+        <div style="font-size: 12px; text-align: left; padding: 10px 14px; background: rgba(93, 208, 196, 0.06); border: 1px solid rgba(93, 208, 196, 0.3); border-radius: 8px; display: grid; grid-template-columns: 1fr auto; gap: 4px 14px;">
+          <span style="color: var(--fg-1);">deploy (X opens)</span><span class="mono">~25 s</span>
+          <span style="color: var(--fg-1);">joinChannel (O joins)</span><span class="mono">~25 s</span>
+          <span style="color: var(--fg-1);">9 off-chain moves</span><span class="mono">&lt; 50 ms</span>
+          <span style="color: var(--fg-1);">settle</span><span class="mono">~25 s</span>
+          <span style="color: var(--fg-1);">claimResult <span class="sub">(after window)</span></span><span class="mono">~25 s</span>
+          <span style="border-top: 1px solid var(--border); padding-top: 4px;"><strong>total</strong></span>
+          <span class="mono" style="border-top: 1px solid var(--border); padding-top: 4px; color: var(--accent);"><strong>~100 s</strong></span>
+        </div>
+      </div>
+
+    </div>
+    <p class="step sub" data-step="3" style="--delay: 0.6s; margin-top: 28px; max-width: 720px; text-align: center;">
+      Saves ~60 % — but the bigger win is qualitative: <strong>during the game itself, the chain is idle.</strong> Players experience clicks, not 25-second waits between turns. The chain is only touched at the boundaries.
+    </p>
+  </section>
+
+  <!-- ╔════════════════════ Slide 3: Mental model ════════════════════╗ -->
+  <section class="slide" data-slide="3">
+    <h2 class="step" data-step="0">The three-step idea</h2>
+    <div class="step cols3" data-step="1" style="--delay: 0.1s; width: 100%; max-width: 980px;">
+      <div class="card glow">
+        <div class="kicker">step 1 — open</div>
+        <h3 style="color: var(--fg-0); font-size: 22px; text-transform: none; letter-spacing: 0; margin: 10px 0 10px; font-weight: 700;">Commit + commit</h3>
+        <p style="margin: 0; color: var(--fg-1); font-size: 14px;">
+          Each player publishes <strong>(a) an identity commitment</strong> and <strong>(b) a Merkle root</strong> over their <strong>81 one-time tokens</strong>.
+        </p>
+      </div>
+      <div class="step card" data-step="2" style="--delay: 0.3s;">
+        <div class="kicker">step 2 — play</div>
+        <h3 style="color: var(--fg-0); font-size: 22px; text-transform: none; letter-spacing: 0; margin: 10px 0 10px; font-weight: 700;">Reveal &amp; verify</h3>
+        <p style="margin: 0; color: var(--fg-1); font-size: 14px;">
+          Each move <strong>reveals one secret</strong>. The opponent recomputes the leaf hash + Merkle path. Pure local computation.
+        </p>
+      </div>
+      <div class="step card" data-step="3" style="--delay: 0.5s;">
+        <div class="kicker">step 3 — settle</div>
+        <h3 style="color: var(--fg-0); font-size: 22px; text-transform: none; letter-spacing: 0; margin: 10px 0 10px; font-weight: 700;">One proof</h3>
+        <p style="margin: 0; color: var(--fg-1); font-size: 14px;">
+          A single <code>settle</code> circuit replays the whole history, verifies every token, records the winner.
+        </p>
+      </div>
+    </div>
+    <div class="step callout" data-step="4" style="--delay: 0.7s; margin-top: 32px;">
+      <strong>The asymmetric trust:</strong> only the player who committed the root can produce valid tokens under it. That replaces the role of a digital signature — which Compact doesn't expose in-circuit (yet).
+    </div>
+  </section>
+
+  <!-- ╔════════════════════ Slide 4: Identity ════════════════════╗ -->
+  <section class="slide" data-slide="4">
+    <h2 class="step" data-step="0">Identity = hash of a secret</h2>
+    <p class="lead step" data-step="1" style="--delay: 0.1s;">
+      No public keys. Each player picks a 32-byte secret <code>sk<sub>P</sub></code> and publishes only its hash.
+    </p>
+    <div class="step" data-step="2" style="--delay: 0.4s;">
+      <div class="code" id="idAnim" style="text-align: center; font-size: 16px; min-width: 580px;">
+sk<sub>X</sub> = <span id="idSecretX" class="mono"></span>
+↓
+id<sub>X</sub> = persistentHash(<span class="s">"ttt:id:"</span>, sk<sub>X</sub>)
+   = <span id="idHashX" class="mono"></span>
+      </div>
+    </div>
+    <p class="step sub" data-step="3" style="--delay: 0.7s; max-width: 680px; text-align: center; margin-top: 24px;">
+      To prove "I am X" inside a circuit, the caller supplies <code>sk<sub>X</sub></code> as a witness; the circuit recomputes the hash and checks it equals the registered <code>id<sub>X</sub></code>. Unforgeable, non-transferable.
+    </p>
+  </section>
+
+  <!-- ╔════════════════════ Slide 5: Token tree ════════════════════╗ -->
+  <section class="slide" data-slide="5">
+    <h2 class="step" data-step="0">Per-move auth: one-time tokens</h2>
+    <p class="step lead" data-step="1" style="--delay: 0.1s;">
+      For every reachable <code>(turn, cell)</code> the player generates a fresh secret. 9 turns × 9 cells = <strong>81 leaves</strong>.
+    </p>
+    <div class="step" data-step="2" style="--delay: 0.3s; width: 100%; max-width: 920px;">
+      <div class="cols2" style="align-items: flex-start;">
+        <div>
+          <h3 style="text-align: left;">81 secrets (turn × cell)</h3>
+          <div id="tokenGrid" style="display: grid; grid-template-columns: repeat(9, 1fr); gap: 3px; font-size: 9px; font-family: ui-monospace, monospace;"></div>
+        </div>
+        <div>
+          <h3 style="text-align: left;">Merkle root (depth 10)</h3>
+          <div id="tokenTree" class="tree" style="font-size: 10px;"></div>
+        </div>
+      </div>
+    </div>
+    <p class="step sub" data-step="3" style="--delay: 0.5s; margin-top: 26px; max-width: 720px; text-align: center;">
+      Only the <strong>root</strong> goes on chain. The 81 secrets stay in the player's browser. Revealing one is what "plays" a move.
+    </p>
+  </section>
+
+  <!-- ╔════════════════════ Slide 6: Leaf per (turn, cell) ═══════════════╗ -->
+  <section class="slide" data-slide="6">
+    <h2 class="step" data-step="0">A leaf per (turn, cell)</h2>
+    <p class="step lead" data-step="1" style="--delay: 0.1s;">
+      Each leaf is <strong>bound to both its turn and its cell</strong>. That's what makes one secret authorise <em>one</em> move — and nothing else.
+    </p>
+    <div class="step" data-step="2" style="--delay: 0.3s; display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; justify-content: center; width: 100%;">
+      <div>
+        <div class="kicker" style="margin-bottom: 8px; text-align: center;">click a slot</div>
+        <div id="leafGrid"></div>
+      </div>
+      <div style="min-width: 360px; max-width: 480px;">
+        <div id="leafReadout2" class="code" style="font-size: 12.5px; white-space: pre-wrap; min-height: 200px;">click a slot in the grid →</div>
+        <div class="step" data-step="3" style="--delay: 0.5s; margin-top: 12px; display: flex; gap: 8px;">
+          <button onclick="showCheaterReuse()" class="warn">⚠ what if X reuses this secret elsewhere?</button>
+        </div>
+      </div>
+    </div>
+    <p class="step sub" data-step="4" style="--delay: 0.7s; margin-top: 22px; max-width: 760px; text-align: center;">
+      81 real slots + 943 zero-padding slots = 1024 leaves (depth-10 tree). The padding exists because a Merkle tree must be a power of 2; the player never uses it.
+    </p>
+  </section>
+
+  <!-- ╔════════════════════ Slide 7: Two-phase open ═══════════════════╗ -->
+  <section class="slide" data-slide="7">
+    <h2 class="step" data-step="0">Who puts the commitments on chain?</h2>
+    <p class="step lead" data-step="1" style="--delay: 0.1s;">
+      If one player deploys with <em>both</em> sides' commitments, they could substitute fake ones for the opponent. So we split the open into <strong>two transactions</strong> — each player submits their own.
+    </p>
+    <div class="step" data-step="2" style="--delay: 0.3s; width: 100%; max-width: 820px;">
+      <div class="timeline" id="openTimeline">
+        <div class="row" data-row="0">
+          <div class="t">phase 1</div>
+          <div>
+            <span class="tag x lg">X</span>&nbsp; calls&nbsp;
+            <code>deploy(idX, rootX)</code>
+            &nbsp;→ contract state:
+            &nbsp;<span class="tag warn">halfOpen</span>
+            <div class="sub" style="margin-top: 4px;">idO &amp; rootO are still zero. No settle, no fraud proof, no timeout can be called yet.</div>
+          </div>
+        </div>
+        <div class="row" data-row="1">
+          <div class="t">phase 2</div>
+          <div>
+            <span class="tag o lg">O</span>&nbsp; calls&nbsp;
+            <code>joinChannel(idO, rootO)</code>
+            &nbsp;from <em>their own browser</em>
+            &nbsp;→ status flips to
+            &nbsp;<span class="tag good">inProgress</span>
+            <div class="sub" style="margin-top: 4px;">The <code>idO</code> &amp; <code>rootO</code> on chain are now provably the values O submitted. The game can begin.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="step" data-step="3" style="--delay: 0.5s; margin-top: 22px;">
+      <button class="primary" onclick="replayOpen()">▶ replay the open sequence</button>
+    </div>
+    <div class="step callout warn" data-step="4" style="--delay: 0.7s; margin-top: 24px; max-width: 760px;">
+      <strong>Front-run mitigation.</strong> If a malicious X tries to call <code>joinChannel</code> themselves with fake O-credentials, status flips to <code>inProgress</code> before O can join. O's later <code>joinChannel</code> tx will revert (&ldquo;channel already open&rdquo;) — an <em>explicit on-chain signal</em> that the contract was tampered with. O walks away having revealed nothing.
+    </div>
+  </section>
+
+  <!-- ╔════════════════════ Slide 8: Move verification ═══════════════╗ -->
+  <section class="slide" data-slide="8">
+    <h2 class="step" data-step="0">How a move authenticates itself</h2>
+    <p class="step lead" data-step="1" style="--delay: 0.1s;">
+      Mover reveals <code>s[k][c]</code>. Receiver climbs the tree to the root.
+    </p>
+    <div class="step" data-step="2" style="--delay: 0.3s; display: flex; gap: 28px; align-items: flex-start; flex-wrap: wrap; justify-content: center;">
+      <div>
+        <div class="kicker" style="margin-bottom: 6px;">turn 2 · cell 4</div>
+        <div class="board sm">
+          <div class="cell"></div><div class="cell"></div><div class="cell"></div>
+          <div class="cell"></div><div class="cell target">?</div><div class="cell"></div>
+          <div class="cell"></div><div class="cell"></div><div class="cell"></div>
+        </div>
+      </div>
+      <div class="card" style="min-width: 360px; max-width: 520px;">
+        <div id="verifySteps" style="font-family: ui-monospace, monospace; font-size: 12.5px; line-height: 1.85;">
+          <div data-verify="0" style="opacity: 0;"><span style="color: var(--fg-2)">1.</span> recompute leaf:<br><span style="margin-left: 18px;">leaf = persistentHash(<span style="color: var(--warn)">"ttt:otk:"</span>, 2, 4, secret)</span></div>
+          <div data-verify="1" style="opacity: 0; margin-top: 8px;"><span style="color: var(--fg-2)">2.</span> degrade to field, then climb:</div>
+          <div data-verify="2" style="opacity: 0; margin-top: 4px; margin-left: 18px;"><span class="tag x">leaf</span> → hash with <span class="tag warn">sibling[0]</span> → field</div>
+          <div data-verify="3" style="opacity: 0; margin-top: 4px; margin-left: 18px;">field → hash with <span class="tag warn">sibling[1]</span> → field</div>
+          <div data-verify="4" style="opacity: 0; margin-top: 4px; margin-left: 18px;"><em style="color: var(--fg-2)">…repeat 10 times…</em></div>
+          <div data-verify="5" style="opacity: 0; margin-top: 8px;"><span style="color: var(--fg-2)">3.</span> compare to registered root:</div>
+          <div data-verify="6" style="opacity: 0; margin-top: 4px; margin-left: 18px;"><span class="tag good">match</span> → valid · player must own the secret</div>
+        </div>
+      </div>
+    </div>
+    <div class="step" data-step="3" style="--delay: 0.5s;">
+      <div id="verifyTree" class="tree" style="margin-top: 20px;"></div>
+    </div>
+    <button class="step" data-step="4" style="--delay: 0.6s; margin-top: 16px;" onclick="replayVerify()">↻ replay animation</button>
+  </section>
+
+  <!-- ╔════════════════════ Slide 9: Off-chain play ════════════════════╗ -->
+  <section class="slide" data-slide="9">
+    <h2 class="step" data-step="0">Playing a game (off-chain)</h2>
+    <p class="step lead" data-step="1" style="--delay: 0.1s;">
+      Each move is a <code>SignedMove</code> over WebSocket. Watch — the chain stays quiet.
+    </p>
+    <div class="step" data-step="2" style="--delay: 0.3s; display: flex; gap: 32px; align-items: flex-start; flex-wrap: wrap; justify-content: center; width: 100%;">
+      <div style="text-align: center;">
+        <div id="liveBoard" class="board"></div>
+        <div class="sub" id="boardTurn" style="margin-top: 10px;">— ready —</div>
+      </div>
+      <div class="ws-stream" id="wsStream"></div>
+    </div>
+    <div class="step" data-step="3" style="--delay: 0.5s; margin-top: 24px;">
+      <button class="primary" id="playBtn" onclick="playGame()">▶ play a 5-move X-win</button>
+      <button onclick="resetLive()">reset</button>
+    </div>
+  </section>
+
+  <!-- ╔════════════════════ Slide 10: Settle ════════════════════╗ -->
+  <section class="slide" data-slide="10">
+    <h2 class="step" data-step="0">Settle: one transaction, the whole game</h2>
+    <p class="step lead" data-step="1" style="--delay: 0.1s;">
+      The 5 moves compress into a single ZK proof. The contract verifies every token in one circuit pass.
+    </p>
+    <div class="step" data-step="2" style="--delay: 0.3s; width: 100%; max-width: 720px;">
+      <div class="code" style="font-size: 13px;">
+<span class="k">callTx</span>.settle(
+  <span class="n">5</span>,                              <span class="c">// nMoves</span>
+  [<span class="n">0</span>, <span class="n">3</span>, <span class="n">1</span>, <span class="n">4</span>, <span class="n">2</span>, …],            <span class="c">// cells</span>
+  [s<span class="n">[0][0]</span>, s<span class="n">[1][3]</span>, …],         <span class="c">// secrets (one per turn)</span>
+  [path<span class="n">[0][0]</span>, path<span class="n">[1][3]</span>, …],   <span class="c">// Merkle paths</span>
+  challengeUntil
+)
+      </div>
+    </div>
+    <div class="step" data-step="3" style="--delay: 0.6s; margin-top: 20px;">
+      <div id="settleProgress" style="text-align: center;">
+        <button class="primary" onclick="runSettle()">▶ run settle</button>
+      </div>
+    </div>
+    <div class="step sub" data-step="4" style="--delay: 0.8s; margin-top: 22px; max-width: 720px; text-align: center;">
+      The proof internally checks <em>every</em> token's Merkle path against the players' published roots. Cheap settlement amortised across all moves.
+    </div>
+  </section>
+
+  <!-- ╔════════════════════ Slide 11: Equivocation ════════════════════╗ -->
+  <section class="slide" data-slide="11">
+    <h2 class="step" data-step="0">Cheating? Instant loss.</h2>
+    <p class="step lead" data-step="1" style="--delay: 0.1s;">
+      A token authenticates exactly one <code>(turn, cell)</code>. Reveal two for the same turn — you've handed the opponent a slashing proof.
+    </p>
+    <div class="step" data-step="2" style="--delay: 0.3s; display: flex; gap: 32px; align-items: flex-start; flex-wrap: wrap; justify-content: center;">
+      <div>
+        <div class="kicker" style="margin-bottom: 8px;">X plays turn 2 — twice</div>
+        <div id="fraudBoard" class="board"></div>
+      </div>
+      <div style="min-width: 360px; max-width: 460px;">
+        <div id="fraudExplain" class="code" style="font-size: 12.5px; min-height: 200px;"></div>
+        <div id="fraudVerdict" style="margin-top: 14px;"></div>
+      </div>
+    </div>
+    <div class="step" data-step="3" style="--delay: 0.5s; margin-top: 22px;">
+      <button class="bad" id="cheatBtn" onclick="runCheat()">🎭 X equivocates</button>
+      <button class="primary" id="proveFraudBtn" onclick="runProve()" disabled>📩 O calls proveEquivocationByX</button>
+      <button onclick="resetFraud()">reset</button>
+    </div>
+  </section>
+
+  <!-- ╔════════════════════ Slide 12: Temporal fork (backtrack) ═══════════╗ -->
+  <section class="slide" data-slide="12">
+    <h2 class="step" data-step="0">…even across time</h2>
+    <p class="step lead" data-step="1" style="--delay: 0.1s;">
+      A <strong>backtrack</strong> looks different to humans. To the contract it's still <em>same turn, two cells</em> — the exact same fraud proof flies.
+    </p>
+    <div class="step" data-step="2" style="--delay: 0.3s; display: flex; gap: 28px; align-items: flex-start; flex-wrap: wrap; justify-content: center; width: 100%;">
+      <div class="ws-stream" id="backtrackStream" style="min-height: 340px; min-width: 380px;"></div>
+      <div style="min-width: 320px; max-width: 460px;">
+        <div class="kicker" style="margin-bottom: 8px;">P2's local log</div>
+        <p class="sub" style="margin: 0 0 14px;">
+          P2 stores every incoming SignedMove keyed by turn. When a <em>second</em> turn-0 message arrives, the new token is captured even though the move is rejected as out-of-order.
+        </p>
+        <div id="backtrackVerdict"></div>
+      </div>
+    </div>
+    <div class="step" data-step="3" style="--delay: 0.5s; margin-top: 22px;">
+      <button class="primary" id="backtrackBtn" onclick="runBacktrack()">▶ play the backtrack attempt</button>
+      <button onclick="resetBacktrack()">reset</button>
+    </div>
+    <p class="step sub" data-step="4" style="--delay: 0.7s; margin-top: 22px; max-width: 760px; text-align: center;">
+      The contract sees <em>the tokens, not the timing.</em> Concurrent fork, retroactive rewind, decade-late leak — same proof, same outcome. One primitive handles every shape of fork.
+    </p>
+  </section>
+
+  <!-- ╔════════════════════ Slide 13: Timeout ════════════════════╗ -->
+  <section class="slide" data-slide="13">
+    <h2 class="step" data-step="0">Silence? Forfeit.</h2>
+    <p class="step lead" data-step="1" style="--delay: 0.1s;">
+      Opponent stops responding. The waiting player arms an on-chain timer; expiry = forfeit.
+    </p>
+    <div class="step" data-step="2" style="--delay: 0.3s;">
+      <div class="timeline" id="timeoutTimeline">
+        <div class="row" data-row="0">
+          <div class="t">t = 0 s</div>
+          <div><span class="tag x lg">X</span>&nbsp; plays cell 0 off-chain. O's turn.</div>
+        </div>
+        <div class="row" data-row="1">
+          <div class="t">+ 10 s</div>
+          <div><span class="tag o lg">O</span>&nbsp; goes silent.</div>
+        </div>
+        <div class="row" data-row="2">
+          <div class="t">+ 30 s</div>
+          <div><span class="tag x lg">X</span>&nbsp; calls <code>settle(nMoves=1)</code> → chain knows turnMark = O.</div>
+        </div>
+        <div class="row" data-row="3">
+          <div class="t">+ 60 s</div>
+          <div><span class="tag x lg">X</span>&nbsp; calls <code>startTimeout(now + 60 s)</code>. Contract checks <em>caller's mark ≠ turnMark</em>.</div>
+        </div>
+        <div class="row" data-row="4">
+          <div class="t">+ 120 s</div>
+          <div><span class="tag good lg">ANY</span>&nbsp; calls permissionless <code>claimTimeout()</code> → <strong>X wins by forfeit.</strong></div>
+        </div>
+      </div>
+    </div>
+    <button class="step primary" data-step="3" style="--delay: 0.6s; margin-top: 22px;" onclick="replayTimeout()">↻ replay timeline</button>
+  </section>
+
+  <!-- ╔════════════════════ Slide 14: Recap ════════════════════╗ -->
+  <section class="slide" data-slide="14">
+    <h2 class="step" data-step="0">Three guarantees</h2>
+    <div class="step cols3" data-step="1" style="--delay: 0.1s; width: 100%; max-width: 920px; margin-top: 12px;">
+      <div class="card glow">
+        <div style="font-size: 28px;">⚡</div>
+        <h3 style="color: var(--fg-0); font-size: 18px; text-transform: none; letter-spacing: 0; margin: 8px 0; font-weight: 700;">Instant play</h3>
+        <p style="margin: 0; color: var(--fg-1); font-size: 14px;">Memory-speed off-chain. Single settle on-chain.</p>
+      </div>
+      <div class="step card glow" data-step="2" style="--delay: 0.25s;">
+        <div style="font-size: 28px;">🚫</div>
+        <h3 style="color: var(--fg-0); font-size: 18px; text-transform: none; letter-spacing: 0; margin: 8px 0; font-weight: 700;">Cheater loses instantly</h3>
+        <p style="margin: 0; color: var(--fg-1); font-size: 14px;">Equivocation = two tokens = automatic slash via a tiny fraud proof.</p>
+      </div>
+      <div class="step card glow" data-step="3" style="--delay: 0.4s;">
+        <div style="font-size: 28px;">⏰</div>
+        <h3 style="color: var(--fg-0); font-size: 18px; text-transform: none; letter-spacing: 0; margin: 8px 0; font-weight: 700;">Silence can't grief</h3>
+        <p style="margin: 0; color: var(--fg-1); font-size: 14px;">Stall the game, lose by forfeit. On-chain timer settles it.</p>
+      </div>
+    </div>
+    <p class="step sub" data-step="4" style="--delay: 0.6s; margin-top: 40px; max-width: 760px; text-align: center;">
+      Built with what Compact actually exposes: <code>persistentHash</code>, <code>transientHash</code>, <code>merkleTreePathRoot</code>. <strong>No in-circuit signatures.</strong>
+    </p>
+    <div class="step" data-step="5" style="--delay: 0.8s; margin-top: 28px;">
+      <a href="http://localhost:5173" style="color: var(--accent); font-size: 16px;">► Play the live demo at localhost:5173</a>
+    </div>
+  </section>
+
+</div>
+
+<!-- ── Nav ────────────────────────────────────────────────────────────── -->
+<div class="nav">
+  <button id="prevBtn">← prev</button>
+  <span class="slide-counter" id="slideCounter">1 / 11</span>
+  <div class="dots" id="dots"></div>
+  <button id="nextBtn">next →</button>
+</div>
+<div class="hint">
+  <span class="key">←</span><span class="key">→</span> navigate · <span class="key">space</span> step · <span class="key">↑↓</span> jump
+</div>
+
+<script>
+// ── Helpers ────────────────────────────────────────────────────────────
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const slides = $$(".slide");
+const TOTAL = slides.length;
+let current = 0;
+const stepsByIdx = slides.map((s) => $$(".step", s).length);
+const stepState = slides.map(() => 0);
+
+// Synthesize plausible-looking hex from a seed for "looks like hashes"
+const fakeHex = (seed, len = 8) => {
+  let h = 0; for (const c of seed) h = (h * 31 + c.charCodeAt(0)) & 0xffffffff;
+  const out = [];
+  for (let i = 0; i < len; i++) {
+    h = (h * 2654435761 + 0x9e3779b1) & 0xffffffff;
+    out.push(((h >>> 24) & 0xff).toString(16).padStart(2, "0"));
+  }
+  return out.join("");
+};
+
+// ── Slide navigation ───────────────────────────────────────────────────
+function renderDots() {
+  const d = $("#dots");
+  d.innerHTML = "";
+  for (let i = 0; i < TOTAL; i++) {
+    const dot = document.createElement("div");
+    dot.className = "dot" + (i === current ? " active" : (i < current ? " visited" : ""));
+    dot.onclick = () => goto(i);
+    d.appendChild(dot);
+  }
+}
+function applySteps() {
+  const s = slides[current];
+  const target = stepState[current];
+  $$(".step", s).forEach((el) => {
+    const step = Number(el.dataset.step ?? 0);
+    if (step <= target) el.classList.add("visible");
+    else el.classList.remove("visible");
+  });
+}
+function goto(n, opts = {}) {
+  if (n < 0 || n >= TOTAL) return;
+  const old = current;
+  slides[old].classList.remove("active");
+  slides[old].classList.toggle("prev", n > old);
+  current = n;
+  slides[current].classList.remove("prev");
+  slides[current].classList.add("active");
+  // Reveal all steps on entry by default (cleaner UX than per-step on slide entry).
+  stepState[current] = stepsByIdx[current];
+  applySteps();
+  $("#slideCounter").textContent = `${current + 1} / ${TOTAL}`;
+  renderDots();
+  onSlideEnter(current);
+}
+function next() {
+  // Try to advance a step within the current slide first; if all visible, move to next slide.
+  if (stepState[current] < stepsByIdx[current] - 1) {
+    stepState[current]++;
+    applySteps();
+  } else if (current < TOTAL - 1) {
+    goto(current + 1);
+  }
+}
+function prev() {
+  if (stepState[current] > 0 && stepsByIdx[current] > 1 && false) {
+    // optional: step backwards within slide. Disabled — feels clunky.
+    stepState[current]--;
+    applySteps();
+  } else if (current > 0) {
+    goto(current - 1);
+  }
+}
+window.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowRight" || e.key === "PageDown") { e.preventDefault(); next(); }
+  else if (e.key === "ArrowLeft" || e.key === "PageUp") { e.preventDefault(); prev(); }
+  else if (e.key === " ") { e.preventDefault(); next(); }
+  else if (e.key === "ArrowDown") { e.preventDefault(); goto(Math.min(TOTAL - 1, current + 1)); }
+  else if (e.key === "ArrowUp")   { e.preventDefault(); goto(Math.max(0, current - 1)); }
+  else if (e.key === "Home")      { e.preventDefault(); goto(0); }
+  else if (e.key === "End")       { e.preventDefault(); goto(TOTAL - 1); }
+});
+$("#nextBtn").onclick = () => next();
+$("#prevBtn").onclick = () => prev();
+$("#deck").addEventListener("click", (e) => {
+  // Click anywhere on slide 1 to advance.
+  if (current === 0 && !e.target.closest("button") && !e.target.closest("a")) next();
+});
+
+// Boot first slide.
+goto(0);
+
+// ── Per-slide entrance animations ──────────────────────────────────────
+function onSlideEnter(idx) {
+  // Dispatch by data-slide so insertions don't shift everything.
+  const ds = slides[idx]?.dataset.slide;
+  switch (ds) {
+    case "2":  animateProblem();   break;
+    case "4":  animateIdentity();  break;
+    case "5":  animateTokenTree(); break;
+    case "6":  renderLeafGrid();   break;
+    case "7":  replayOpen();       break;
+    case "8":  replayVerify();     break;
+    case "9":  resetLive();        break;
+    case "10": resetSettle();      break;
+    case "11": resetFraud();       break;
+    case "12": resetBacktrack();   break;
+    case "13": replayTimeout();    break;
+  }
+}
+
+// ── Slide 2: animated counters (both tick to realistic totals) ─────────
+let problemAnim = null;
+function animateProblem() {
+  if (problemAnim) clearInterval(problemAnim);
+  const naive = $("#naiveCounter");
+  const channel = $("#channelCounter");
+  const NAIVE_END   = 250;  // 25s deploy + 9 × 25s on-chain moves
+  const CHANNEL_END = 100;  // 25s deploy + 25s join + 25s settle + 25s claimResult
+  const fmt = (s) => {
+    const m = Math.floor(s / 60), sec = s % 60;
+    return `${m}:${String(sec).padStart(2, "0")}`;
+  };
+  let t = 0;
+  naive.textContent   = fmt(0);
+  channel.textContent = fmt(0);
+  problemAnim = setInterval(() => {
+    t += 1;
+    naive.textContent   = fmt(Math.min(t, NAIVE_END));
+    channel.textContent = fmt(Math.min(t, CHANNEL_END));
+    if (t >= NAIVE_END) { clearInterval(problemAnim); problemAnim = null; }
+  }, 25);
+}
+
+// ── Slide 4: identity hash animation ───────────────────────────────────
+let idAnim = null;
+function animateIdentity() {
+  if (idAnim) clearInterval(idAnim);
+  const skEl = $("#idSecretX"), hashEl = $("#idHashX");
+  skEl.style.color = "var(--warn)";
+  hashEl.style.color = "var(--accent)";
+  let frame = 0;
+  idAnim = setInterval(() => {
+    frame++;
+    if (frame < 30) {
+      skEl.textContent = "0x" + fakeHex(`sk:${frame}`, 8) + "…";
+      hashEl.textContent = "0x" + fakeHex(`h:${frame}`, 8) + "…";
+    } else if (frame === 30) {
+      skEl.textContent = "0x" + fakeHex("sk:final", 12) + "…";
+      hashEl.textContent = "0x" + fakeHex("idfinal", 12) + "…";
+      clearInterval(idAnim); idAnim = null;
+    }
+  }, 40);
+}
+
+// ── Slide 5: token-tree build ──────────────────────────────────────────
+function animateTokenTree() {
+  const grid = $("#tokenGrid"); grid.innerHTML = "";
+  for (let t = 0; t < 9; t++) {
+    for (let c = 0; c < 9; c++) {
+      const cell = document.createElement("div");
+      cell.style.cssText = "background: var(--bg-2); border: 1px solid var(--border); border-radius: 3px; padding: 3px 2px; text-align: center; color: var(--fg-2); opacity: 0; transition: opacity 0.3s, background 0.3s, color 0.3s; font-size: 8px;";
+      cell.textContent = "·";
+      grid.appendChild(cell);
+    }
+  }
+  const cells = $$("#tokenGrid > div");
+  let i = 0;
+  const fill = setInterval(() => {
+    if (i >= 81) { clearInterval(fill); buildTreeViz(); return; }
+    const cell = cells[i];
+    cell.style.opacity = 1;
+    cell.style.background = "var(--x-dim)";
+    cell.style.color = "var(--x)";
+    cell.textContent = fakeHex(`s:${i}`, 1);
+    i++;
+  }, 25);
+}
+function buildTreeViz() {
+  const tree = $("#tokenTree"); tree.innerHTML = "";
+  // Show 4 levels + root.
+  const levels = [];
+  for (let depth = 0; depth < 4; depth++) {
+    const lv = document.createElement("div");
+    lv.className = "level";
+    const nNodes = Math.max(2, 12 >> depth);
+    for (let i = 0; i < nNodes; i++) {
+      const n = document.createElement("div");
+      n.className = "node";
+      n.textContent = depth === 0 ? `leaf` : `h@${depth}`;
+      lv.appendChild(n);
+    }
+    levels.push(lv);
+  }
+  levels.reverse();
+  const rootLv = document.createElement("div");
+  rootLv.className = "level";
+  const root = document.createElement("div");
+  root.className = "node root";
+  root.textContent = "root";
+  rootLv.appendChild(root);
+  tree.appendChild(rootLv);
+  for (const lv of levels) tree.appendChild(lv);
+
+  // Animate appearance from top down.
+  const nodes = $$("#tokenTree .node");
+  nodes.forEach((n, idx) => {
+    n.style.opacity = "0";
+    setTimeout(() => n.classList.add("appear"), 200 + idx * 12);
+  });
+}
+
+// ── Slide 6: leaf-per-(turn, cell) grid ────────────────────────────────
+let selectedLeafT = null, selectedLeafC = null;
+function renderLeafGrid() {
+  const grid = $("#leafGrid");
+  let html = `<div style="display: grid; grid-template-columns: 22px repeat(9, 32px); grid-template-rows: 18px repeat(9, 32px); gap: 3px; font-family: ui-monospace, monospace;">`;
+  html += `<div></div>`;
+  for (let c = 0; c < 9; c++) {
+    html += `<div style="text-align:center; font-size: 10px; color: var(--fg-2); display:flex; align-items:flex-end; justify-content:center;">c${c}</div>`;
+  }
+  for (let t = 0; t < 9; t++) {
+    html += `<div style="text-align:right; font-size: 10px; color: var(--fg-2); display:flex; align-items:center; justify-content:flex-end; padding-right: 3px;">t${t}</div>`;
+    for (let c = 0; c < 9; c++) {
+      html += `<div class="leaf-cell" data-t="${t}" data-c="${c}"
+                   style="background: var(--x-dim); border: 1px solid rgba(255,141,141,0.4); border-radius: 4px; padding: 2px;
+                          text-align:center; font-size: 9px; color: var(--x); cursor: pointer;
+                          display:flex; align-items:center; justify-content:center; transition: all 0.15s ease;"
+              >${fakeHex("l:"+t+":"+c, 1)}</div>`;
+    }
+  }
+  html += `</div>`;
+  grid.innerHTML = html;
+  $$("#leafGrid .leaf-cell").forEach((c) => {
+    c.onclick = () => selectLeaf(+c.dataset.t, +c.dataset.c);
+  });
+  selectedLeafT = null; selectedLeafC = null;
+  $("#leafReadout2").innerHTML = `click a slot in the grid →`;
+}
+function selectLeaf(t, c) {
+  selectedLeafT = t; selectedLeafC = c;
+  $$("#leafGrid .leaf-cell").forEach((el) => {
+    const sel = +el.dataset.t === t && +el.dataset.c === c;
+    el.style.outline = sel ? "2px solid var(--accent)" : "";
+    el.style.transform = sel ? "scale(1.15)" : "scale(1)";
+    el.style.background = sel ? "var(--accent-dim)" : "var(--x-dim)";
+    el.style.color = sel ? "var(--accent)" : "var(--x)";
+  });
+  const secret = fakeHex(`x:${t}:${c}:s`, 12);
+  const leaf = fakeHex(`leaf:${t}:${c}`, 12);
+  $("#leafReadout2").innerHTML =
+    `<span style="color: var(--accent);">leaf preimage for (turn ${t}, cell ${c}):</span>\n` +
+    `  domainSep: "ttt:otk:"\n` +
+    `  turn:      ${t}\n` +
+    `  cell:      ${c}\n` +
+    `  secret:    s[${t}][${c}] = 0x${secret}…\n\n` +
+    `<span style="color: var(--accent);">leaf hash =</span>\n` +
+    `  persistentHash(domainSep, turn, cell, secret)\n` +
+    `  = 0x${leaf}…\n\n` +
+    `<span style="color: var(--fg-2);">// one of the 81 real leaves committed</span>\n` +
+    `<span style="color: var(--fg-2);">// in this player's Merkle tree.</span>`;
+}
+function showCheaterReuse() {
+  if (selectedLeafT === null) selectLeaf(2, 4);
+  const t = selectedLeafT, c = selectedLeafC;
+  const altT = (t + 3) % 9, altC = (c + 2) % 9;
+  const realLeaf = fakeHex(`leaf:${t}:${c}`, 12);
+  const fakeLeaf = fakeHex(`leaf:${altT}:${altC}`, 12);
+  $("#leafReadout2").innerHTML =
+    `<span style="color: var(--good);">✓ honest play at (turn ${t}, cell ${c}):</span>\n` +
+    `  persistentHash("ttt:otk:", ${t}, ${c}, s[${t}][${c}])\n` +
+    `  = 0x${realLeaf}…   ← matches a leaf ✓\n\n` +
+    `<span style="color: var(--bad);">✗ cheater claims same secret @ (turn ${altT}, cell ${altC}):</span>\n` +
+    `  persistentHash("ttt:otk:", ${altT}, ${altC}, s[${t}][${c}])\n` +
+    `  = 0x${fakeLeaf}…   ← totally different bytes!\n\n` +
+    `<span style="color: var(--bad);">The recomputed leaf is NOT in the tree.</span>\n` +
+    `<span style="color: var(--fg-2);">merkleTreePathRoot(...) won't match rootX → settle reverts.</span>`;
+}
+window.renderLeafGrid = renderLeafGrid;
+window.showCheaterReuse = showCheaterReuse;
+
+// ── Slide 7: two-phase open animation ──────────────────────────────────
+function replayOpen() {
+  const rows = $$("#openTimeline .row");
+  rows.forEach((r) => r.classList.remove("show"));
+  rows.forEach((r, i) => setTimeout(() => r.classList.add("show"), 240 + i * 1200));
+}
+window.replayOpen = replayOpen;
+
+// ── Slide 8: verify animation ──────────────────────────────────────────
+async function replayVerify() {
+  if (slides[current]?.dataset.slide !== "8") return;
+  // Reset
+  $$("#verifySteps > div").forEach((d) => d.style.opacity = "0");
+  const tree = $("#verifyTree"); tree.innerHTML = "";
+  // Build a 4-level tree.
+  const levels = [];
+  for (let depth = 0; depth < 4; depth++) {
+    const lv = document.createElement("div");
+    lv.className = "level";
+    const n = Math.max(2, 12 >> depth);
+    for (let i = 0; i < n; i++) {
+      const node = document.createElement("div");
+      node.className = "node";
+      node.dataset.depth = depth;
+      node.dataset.idx = i;
+      node.textContent = depth === 0 ? "leaf" : `h${depth}`;
+      lv.appendChild(node);
+    }
+    levels.push(lv);
+  }
+  const rootLv = document.createElement("div");
+  rootLv.className = "level";
+  const root = document.createElement("div");
+  root.className = "node";
+  root.dataset.depth = 4;
+  root.textContent = "root";
+  rootLv.appendChild(root);
+  levels.reverse();
+  tree.appendChild(rootLv);
+  for (const lv of levels) tree.appendChild(lv);
+
+  // Reveal verify steps + light up nodes along the path.
+  const lines = $$("#verifySteps > div");
+  const targetCol = 5; // arbitrary leaf column
+  for (let i = 0; i < lines.length; i++) {
+    await sleep(380);
+    lines[i].style.transition = "opacity 0.4s ease";
+    lines[i].style.opacity = "1";
+    if (i === 0) {
+      // Light the leaf
+      const leafNode = tree.querySelector(`.node[data-depth="0"][data-idx="${targetCol}"]`);
+      if (leafNode) leafNode.classList.add("is-leaf");
+    } else if (i >= 2 && i <= 4) {
+      // Light a sibling + path on the way up
+      const depth = i - 1;
+      const visualNodes = $$(`.node[data-depth="${depth}"]`, tree);
+      const k = Math.min(targetCol >> (depth), visualNodes.length - 2);
+      if (visualNodes[k])     visualNodes[k].classList.add("on-path");
+      if (visualNodes[k + 1]) visualNodes[k + 1].classList.add("sibling");
+    } else if (i === 6) {
+      root.classList.add("on-path");
+    }
+  }
+}
+window.replayVerify = replayVerify;
+
+// ── Slide 7: WS-stream gameplay ────────────────────────────────────────
+function paintBoard(el, board) {
+  el.innerHTML = "";
+  for (let i = 0; i < 9; i++) {
+    const c = document.createElement("div");
+    c.className = "cell";
+    const v = board[i];
+    if (v === 1) { c.classList.add("x", "placed"); c.textContent = "X"; }
+    else if (v === 2) { c.classList.add("o", "placed"); c.textContent = "O"; }
+    el.appendChild(c);
+  }
+}
+let liveState = { board: [0,0,0,0,0,0,0,0,0], playing: false };
+function resetLive() {
+  liveState.board = [0,0,0,0,0,0,0,0,0];
+  paintBoard($("#liveBoard"), liveState.board);
+  $("#wsStream").innerHTML = "";
+  $("#boardTurn").textContent = "— ready —";
+  $("#playBtn").disabled = false;
+  liveState.playing = false;
+}
+async function playGame() {
+  if (liveState.playing) return;
+  liveState.playing = true;
+  $("#playBtn").disabled = true;
+  resetLive();
+  $("#playBtn").disabled = true; liveState.playing = true;
+  const stream = $("#wsStream");
+  const seq = [
+    { who: "x", turn: 0, cell: 0 },
+    { who: "o", turn: 1, cell: 3 },
+    { who: "x", turn: 2, cell: 1 },
+    { who: "o", turn: 3, cell: 4 },
+    { who: "x", turn: 4, cell: 2 },
+  ];
+  for (const m of seq) {
+    await sleep(900);
+    const msg = document.createElement("div");
+    msg.className = `ws-msg ${m.who}`;
+    const secret = fakeHex(`${m.who}:${m.turn}:${m.cell}`, 6);
+    const arrow = m.who === "x" ? "X →" : "← O";
+    msg.innerHTML = `<strong>${arrow}</strong>&nbsp; SignedMove { turn: ${m.turn}, cell: ${m.cell}, token: 0x${secret}… }`;
+    stream.appendChild(msg);
+    stream.scrollTop = stream.scrollHeight;
+    liveState.board[m.cell] = m.who === "x" ? 1 : 2;
+    paintBoard($("#liveBoard"), liveState.board);
+    $("#boardTurn").textContent = `turn ${m.turn} · ${m.who.toUpperCase()} played cell ${m.cell}`;
+  }
+  await sleep(700);
+  const winMsg = document.createElement("div");
+  winMsg.className = "ws-msg chain";
+  winMsg.innerHTML = `🏁 <strong>X wins top row (0,1,2)</strong> — chain still hasn't been touched.`;
+  stream.appendChild(winMsg);
+  $("#boardTurn").textContent = "X wins · ready to settle";
+  liveState.playing = false;
+}
+window.resetLive = resetLive;
+window.playGame = playGame;
+
+// ── Slide 8: settle proof animation ────────────────────────────────────
+let settleAnim = null;
+function resetSettle() {
+  if (settleAnim) clearTimeout(settleAnim);
+  const c = $("#settleProgress");
+  c.innerHTML = `<button class="primary" onclick="runSettle()">▶ run settle</button>`;
+}
+async function runSettle() {
+  if (settleAnim) clearTimeout(settleAnim);
+  const c = $("#settleProgress");
+  c.innerHTML = `
+    <div class="proof-anim"><div class="spinner"></div> building ZK proof… <span id="proofPct">0%</span></div>
+    <div class="byterow" id="byterow" style="margin-top: 12px; justify-content: center; max-width: 480px; margin-left: auto; margin-right: auto;"></div>
+  `;
+  const bytes = 64;
+  const row = $("#byterow");
+  for (let i = 0; i < bytes; i++) {
+    const b = document.createElement("div");
+    b.className = "b";
+    b.textContent = fakeHex(`b:${i}`, 1);
+    row.appendChild(b);
+  }
+  let pct = 0;
+  const tick = async () => {
+    pct = Math.min(100, pct + 4);
+    $("#proofPct").textContent = pct + "%";
+    const litCount = Math.floor((pct / 100) * bytes);
+    $$("#byterow .b").forEach((b, idx) => b.classList.toggle("lit", idx < litCount));
+    if (pct < 100) settleAnim = setTimeout(tick, 100);
+    else {
+      await sleep(300);
+      c.innerHTML = `
+        <div style="margin-top: 4px;">
+          <div class="tag good lg">tx 0x${fakeHex("settleTx", 10)}… landed</div>
+        </div>
+        <div style="margin-top: 12px; color: var(--fg-1); font-size: 14px;">
+          on-chain: <span class="tag good">winner: X</span>&nbsp;
+          <span class="tag warn">challengeUntil: now + 30s</span>
+        </div>
+        <button style="margin-top: 18px;" onclick="resetSettle()">↻ reset</button>
+      `;
+    }
+  };
+  tick();
+}
+window.runSettle = runSettle;
+window.resetSettle = resetSettle;
+
+// ── Slide 9: equivocation ──────────────────────────────────────────────
+const FRAUD_INIT = [1,0,0,2,0,0,0,0,0];
+function paintFraud(state) {
+  const el = $("#fraudBoard"); el.innerHTML = "";
+  for (let i = 0; i < 9; i++) {
+    const c = document.createElement("div");
+    c.className = "cell";
+    if (state[i] === 1) { c.classList.add("x", "placed"); c.textContent = "X"; }
+    else if (state[i] === 2) { c.classList.add("o", "placed"); c.textContent = "O"; }
+    if (state.cheated && (i === 4 || i === 5)) { c.classList.add("x", "fraud"); c.textContent = "X?"; }
+    el.appendChild(c);
+  }
+}
+function resetFraud() {
+  paintFraud([...FRAUD_INIT]);
+  $("#fraudExplain").textContent = "Click 'X equivocates' to see two valid X-tokens for turn 2.";
+  $("#fraudVerdict").innerHTML = "";
+  $("#proveFraudBtn").disabled = true;
+  $("#cheatBtn").disabled = false;
+}
+async function runCheat() {
+  $("#cheatBtn").disabled = true;
+  const s = [...FRAUD_INIT];
+  s.cheated = true;
+  paintFraud(s);
+  const sA = fakeHex("x:2:4:s", 12);
+  const sB = fakeHex("x:2:5:s", 12);
+  const lines = [
+    [`<span style="color: var(--fg-2);">// turn 2 board state =</span>`, 200],
+    [`<span style="color: var(--fg-2);">// X:0, O:3, then X equivocates:</span>`, 600],
+    [``, 200],
+    [`<span style="color: var(--bad)">moveA</span> = SignedMove {`, 400],
+    [`  turn:   2,`, 200],
+    [`  cell:   <span style="color: var(--accent)">4</span>,`, 200],
+    [`  secret: 0x${sA}…  <span style="color: var(--fg-2)">// X's token for (2, 4)</span>`, 400],
+    [`}`, 200],
+    [``, 200],
+    [`<span style="color: var(--bad)">moveB</span> = SignedMove {`, 400],
+    [`  turn:   2,`, 200],
+    [`  cell:   <span style="color: var(--accent)">5</span>,`, 200],
+    [`  secret: 0x${sB}…  <span style="color: var(--fg-2)">// X's token for (2, 5)</span>`, 400],
+    [`}`, 400],
+    [``, 200],
+    [`<span style="color: var(--warn)">Both verify under rootX. Same turn, different cells.</span>`, 0],
+  ];
+  $("#fraudExplain").innerHTML = "";
+  let buffer = "";
+  for (const [line, wait] of lines) {
+    buffer += (buffer ? "\n" : "") + line;
+    $("#fraudExplain").innerHTML = buffer;
+    await sleep(wait || 60);
+  }
+  $("#proveFraudBtn").disabled = false;
+}
+async function runProve() {
+  $("#proveFraudBtn").disabled = true;
+  $("#fraudVerdict").innerHTML = `<div class="proof-anim"><div class="spinner"></div> submitting proveEquivocationByX…</div>`;
+  await sleep(1500);
+  $("#fraudVerdict").innerHTML = `
+    <div class="callout bad" style="max-width: 460px;">
+      <strong>verdict</strong> — proof accepted by the contract<br>
+      <div style="margin-top: 6px;">
+        <span class="tag o">winner = O</span>
+        <span class="tag good">status = settled</span>
+      </div>
+      No challenge window. No further play. Cheaters lose instantly.
+    </div>
+  `;
+}
+window.runCheat = runCheat;
+window.runProve = runProve;
+window.resetFraud = resetFraud;
+
+// ── Slide 10: temporal fork (backtrack) ───────────────────────────────
+function resetBacktrack() {
+  $("#backtrackStream").innerHTML = "";
+  $("#backtrackVerdict").innerHTML = "";
+  $("#backtrackBtn").disabled = false;
+}
+async function runBacktrack() {
+  resetBacktrack();
+  $("#backtrackBtn").disabled = true;
+  const stream = $("#backtrackStream");
+  const append = (html, who) => {
+    const d = document.createElement("div");
+    d.className = `ws-msg ${who}`;
+    d.innerHTML = html;
+    stream.appendChild(d);
+    stream.scrollTop = stream.scrollHeight;
+    return d;
+  };
+  const game = [
+    ["x", `<strong>X →</strong>&nbsp; turn 0, cell <span style="color: var(--good)">0</span>, token 0x${fakeHex("x:0:0:s", 6)}…`],
+    ["o", `<strong>← O</strong>&nbsp; turn 1, cell 3, token 0x${fakeHex("o:1:3:s", 6)}…`],
+    ["x", `<strong>X →</strong>&nbsp; turn 2, cell 1, token 0x${fakeHex("x:2:1:s", 6)}…`],
+    ["o", `<strong>← O</strong>&nbsp; turn 3, cell 4, token 0x${fakeHex("o:3:4:s", 6)}…`],
+    ["x", `<strong>X →</strong>&nbsp; turn 4, cell 2, token 0x${fakeHex("x:4:2:s", 6)}…`],
+    ["chain", "🏁 <strong>X wins top row</strong> — off-chain game ends."],
+  ];
+  for (const [who, text] of game) {
+    await sleep(420);
+    append(text, who);
+  }
+  await sleep(900);
+  const gap = document.createElement("div");
+  gap.style.cssText = "text-align: center; color: var(--fg-2); font-size: 12px; padding: 16px 0; font-style: italic; border-top: 1px dashed var(--border); border-bottom: 1px dashed var(--border); margin: 10px 0;";
+  gap.innerHTML = "⏱ &nbsp; minutes / hours / days later &nbsp; ⏱";
+  stream.appendChild(gap);
+  await sleep(800);
+  const backtrack = append(
+    `<strong>X →</strong>&nbsp; turn <span style="color: var(--bad)">0</span>, cell <span style="color: var(--bad)">1</span>, token 0x${fakeHex("x:0:1:s", 6)}…  <span style="color: var(--bad)">⚠ different cell, same turn</span>`,
+    "x"
+  );
+  backtrack.style.borderColor = "var(--bad)";
+  backtrack.style.background = "rgba(255, 122, 122, 0.12)";
+  await sleep(900);
+  $("#backtrackVerdict").innerHTML = `
+    <div class="callout bad" style="max-width: 460px;">
+      <strong>captured.</strong> P2 now holds two valid X-tokens for turn 0:
+      <div class="mono" style="margin: 8px 0; font-size: 12.5px; line-height: 1.7;">
+        s[0][<span style="color: var(--good)">0</span>] &nbsp; <span style="color: var(--fg-2)">// from the original game</span><br>
+        s[0][<span style="color: var(--bad)">1</span>] &nbsp; <span style="color: var(--fg-2)">// from the backtrack</span>
+      </div>
+      Same <code>proveEquivocationByX(turn=0, cellA=0, cellB=1, …)</code> → <span class="tag o">winner = O</span>.
+    </div>
+  `;
+}
+window.runBacktrack = runBacktrack;
+window.resetBacktrack = resetBacktrack;
+
+// ── Slide 10: timeout timeline animation ───────────────────────────────
+function replayTimeout() {
+  const rows = $$("#timeoutTimeline .row");
+  rows.forEach((r) => r.classList.remove("show"));
+  rows.forEach((r, i) => setTimeout(() => r.classList.add("show"), 240 + i * 700));
+}
+window.replayTimeout = replayTimeout;
+
+</script>
+</body>
+</html>
