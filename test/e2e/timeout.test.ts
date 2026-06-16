@@ -1,50 +1,41 @@
-// E2E timeout/forfeit: X plays one move, O stops responding. X settles the
-// single-move history (turnMark flips to 2), arms a timeout, waits for it to
-// elapse, and claims the forfeit. Requires the local stack.
+// E2E timeout/forfeit (arena): X settles one move, O goes silent, X arms a
+// timeout and claims the forfeit after the deadline.
 
 import { describe, test, expect } from "vitest";
 import { Status, Winner } from "../../src/contract/managed/contract/index.js";
-import { openChannelTogether } from "../../src/sdk/game/game-session.ts";
+import { buildPlayers, SCHEDULE_A } from "../helpers/fixtures.ts";
+import { openGame } from "./driver.ts";
 import { sleep } from "./helpers.ts";
+import { KIND_PLACE } from "../../src/sdk/game/rules.ts";
 
 describe("e2e: timeout / forfeit", () => {
   test("O stops responding -> X startTimeout + claimTimeout -> X wins", async () => {
-    const { x, o, contractAddress } = await openChannelTogether();
-    x.setOpponent(o);
-    o.setOpponent(x);
-    console.log("Deployed channel at", contractAddress);
+    const pair = buildPlayers(SCHEDULE_A, "e2e-timeout", 0xab99cdn);  // unique gameId (≠ playersC)
+    const g = await openGame(pair);
+    console.log("Game opened on arena", g.contractAddress);
 
-    // X plays one move; it's now O's turn but O is silent.
-    const m0 = x.myMove(0);
-    expect(o.receiveMove(m0).ok).toBe(true);
+    const untilTime = BigInt(Math.floor(Date.now() / 1000) + 600);
+    const settleTx = await g.settleChunk(0, [{ kind: KIND_PLACE, cell: 0, size: 0 }], untilTime);
+    console.log("settle txId:", settleTx);
+    let d = await g.readDyn();
+    expect(d.committedTurns).toBe(1);
+    expect(d.turnMark).toBe(2);
 
-    // X settles the 1-move history with a 1s challenge window so we can
-    // promptly arm the timeout. (The on-chain `turnMark` becomes 2 = O.)
-    const settleTxId = await x.settle(1);
-    console.log("settle txId:", settleTxId);
-    let led = await x.readState();
-    expect(led.committedTurns).toBe(1n);
-    expect(led.turnMark).toBe(2n);
-
-    // Give the indexer time to catch up to the settle tx so the next
-    // built tx sees the post-settle contract state. Substrate block-time
-    // is ~6s plus indexer ingestion delay.
     await sleep(20_000);
 
-    // X arms a 5s deadline. (Block-time on Midnight's substrate is in seconds.)
     const graceSec = 10;
-    const armTxId = await x.startTimeout(graceSec);
-    console.log("startTimeout txId:", armTxId);
-    led = await x.readState();
-    expect(led.hasDeadline).toBe(true);
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + graceSec);
+    const armTx = await g.startTimeoutAsX(deadline);
+    console.log("startTimeout txId:", armTx);
+    d = await g.readDyn();
+    expect(d.hasDeadline).toBe(true);
 
-    // Wait past the deadline then claim.
-    await sleep((graceSec + 4) * 1000);
-    const claimTxId = await x.claimTimeout();
-    console.log("claimTimeout txId:", claimTxId);
+    await sleep((graceSec + 10) * 1000);
+    const claimTx = await g.claimTimeout();
+    console.log("claimTimeout txId:", claimTx);
 
-    led = await x.readState();
-    expect(led.winner).toBe(Winner.x);
-    expect(led.status).toBe(Status.settled);
+    d = await g.readDyn();
+    expect(d.winner).toBe(Winner.x);
+    expect(d.status).toBe(Status.settled);
   }, 600_000);
 });

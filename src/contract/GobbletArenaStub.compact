@@ -1,0 +1,44 @@
+// GobbletArenaStub.compact
+// DEPLOY-ONLY twin of GobbletArena.compact: identical ledger declarations
+// (same order — state layout must match) with ZERO exported circuits and an
+// empty constructor. The arena deploys ONCE per chain via this stub (small
+// tx), then each circuit's verifier key is inserted in its own maintenance
+// transaction. See GobbletArena.compact / deploy.ts.
+//
+// KEEP IN SYNC with GobbletArena.compact's ledger declarations.
+
+pragma language_version >= 0.16.0;
+
+import CompactStandardLibrary;
+
+export enum Status { halfOpen, inProgress, settled }
+export enum Winner { none, x, o, draw }
+
+struct GameKeys {
+  idX: Bytes<32>,
+  idO: Bytes<32>,
+  rootX: MerkleTreeDigest,
+  rootO: MerkleTreeDigest,
+  rootIdxX: MerkleTreeDigest,
+  rootIdxO: MerkleTreeDigest,
+  rootRndX: MerkleTreeDigest,
+  rootRndO: MerkleTreeDigest,
+}
+
+struct GameDyn {
+  turnMark: Uint<8>,
+  committedTurns: Uint<8>,
+  status: Status,
+  winner: Winner,
+  deadline: Uint<64>,
+  hasDeadline: Boolean,
+  challengeUntil: Uint<64>,
+  hasChallenge: Boolean,
+}
+
+export ledger gameKeys: Map<Bytes<32>, GameKeys>;
+export ledger gameState: Map<Bytes<32>, GameDyn>;
+export ledger boards: Map<Bytes<32>, Map<Uint<16>, Uint<8>>>;
+export ledger tops: Map<Bytes<32>, Map<Uint<16>, Uint<8>>>;
+export ledger reserves: Map<Bytes<32>, Map<Uint<16>, Uint<8>>>;
+export ledger actionLogs: Map<Bytes<32>, Map<Uint<16>, Uint<16>>>;

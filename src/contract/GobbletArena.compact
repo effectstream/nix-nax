@@ -1,0 +1,749 @@
+// GobbletArena.compact
+// Multi-game arena for the 4x4 stacked-pieces state-channel game. ONE
+// deployment hosts ANY number of concurrent games: every ledger value is
+// keyed by a client-generated 32-byte gameId, so starting a game is a single
+// fast `createGame` call instead of a contract deploy.
+//
+// GAME RULES (mirrored in src/sdk/game/rules.ts — keep in sync):
+//   * 4x4 board; each cell stacks up to 4 layers. A piece of size s
+//     (0=smallest … 3=largest) sits at layer s; strictly-larger covers
+//     smaller (own or opponent's).
+//   * 12 pieces per player (3 per size). Removal returns the piece to its
+//     owner's reserve and reveals what was beneath.
+//   * Win: 4 visible tops in a row (10 lines: 4 rows + 4 cols + 2 diagonals);
+//     mover precedence; a valid history STOPS at the first win. 128-turn cap = draw.
+//   * Turn 0 places. Later turns are gated by a 4-bit joint ROLL:
+//     each side pre-commits four bits per ceremony leaf; joint bit
+//     jk = bIk XOR bRk; v = j0 + 2*j1 + 4*j2 + 8*j3 (uniform 0..15).
+//     v < 3  -> REMOVE turn (3/16 = 18.75% ~ "about 20%")
+//     v >= 3 -> PLACE turn.
+//     Pass only when a remove turn has no removable target.
+//
+// PER-GAME IDENTITY: idP = persistentHash(["gob:id:", gameId, sk]) — a
+// player's identity (and all three Merkle trees, whose leaf preimages embed
+// gameId) is scoped to one game; nothing replays across games.
+//
+// OPTIMISTIC CLASS + proveWrongParity: settle validates rules against a
+// CLAIMED class (1=place, 0=remove/pass) recorded in the per-game actionLog;
+// lying about the class is slashable with the turn's two committed reveals.
+//
+// CHUNKED SETTLE: up to 8 moves per call, strictly extending the committed
+// history. Constant circuit size regardless of game length.
+
+pragma language_version >= 0.16.0;
+
+import CompactStandardLibrary;
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export enum Status { halfOpen, inProgress, settled }
+export enum Winner { none, x, o, draw }
+
+// Marks: 0 = empty, 1 = X (moves on even turns), 2 = O.
+// Kinds: 1 = place, 2 = remove, 3 = pass.
+
+struct TokenPreimage {
+  domainSep: Bytes<32>,
+  gameId: Bytes<32>,
+  turn: Uint<16>,
+  kind: Uint<8>,
+  cell: Uint<8>,
+  size: Uint<8>,
+  secret: Bytes<32>,
+}
+
+struct IndexPreimage {
+  domainSep: Bytes<32>,
+  gameId: Bytes<32>,
+  turn: Uint<16>,
+  slot: Uint<8>,
+  b0: Uint<8>,
+  b1: Uint<8>,
+  b2: Uint<8>,
+  b3: Uint<8>,
+  secret: Bytes<32>,
+}
+
+struct RandomPreimage {
+  domainSep: Bytes<32>,
+  gameId: Bytes<32>,
+  turn: Uint<16>,
+  slot: Uint<8>,
+  b0: Uint<8>,
+  b1: Uint<8>,
+  b2: Uint<8>,
+  b3: Uint<8>,
+  random: Bytes<32>,
+}
+
+// Identities + tree roots — written at createGame / joinGame, then immutable.
+struct GameKeys {
+  idX: Bytes<32>,
+  idO: Bytes<32>,
+  rootX: MerkleTreeDigest,
+  rootO: MerkleTreeDigest,
+  rootIdxX: MerkleTreeDigest,
+  rootIdxO: MerkleTreeDigest,
+  rootRndX: MerkleTreeDigest,
+  rootRndO: MerkleTreeDigest,
+}
+
+// Mutable per-game scalars — read once, written back via `withDyn` helpers.
+struct GameDyn {
+  turnMark: Uint<8>,
+  committedTurns: Uint<8>,
+  status: Status,
+  winner: Winner,
+  deadline: Uint<64>,
+  hasDeadline: Boolean,
+  challengeUntil: Uint<64>,
+  hasChallenge: Boolean,
+}
+
+// ---------------------------------------------------------------------------
+// On-chain (public) state — everything keyed by gameId
+// ---------------------------------------------------------------------------
+
+export ledger gameKeys: Map<Bytes<32>, GameKeys>;
+export ledger gameState: Map<Bytes<32>, GameDyn>;
+// boards: cell*4+layer -> mark (sparse; absent == empty).
+export ledger boards: Map<Bytes<32>, Map<Uint<16>, Uint<8>>>;
+// tops: cell -> visible mark (sparse; absent == empty).
+export ledger tops: Map<Bytes<32>, Map<Uint<16>, Uint<8>>>;
+// reserves: mark*4+size -> remaining count (0..3).
+export ledger reserves: Map<Bytes<32>, Map<Uint<16>, Uint<8>>>;
+// actionLogs: turn -> claimedClass*256 + kind*64 + size*16 + cell.
+export ledger actionLogs: Map<Bytes<32>, Map<Uint<16>, Uint<16>>>;
+
+// The arena itself has no per-deployment state: the constructor is empty.
+
+// ---------------------------------------------------------------------------
+// Caller authentication (per-game proof of knowledge)
+// ---------------------------------------------------------------------------
+
+witness localSecret(): Bytes<32>;
+
+circuit playerId(gameId: Bytes<32>, secret: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<3, Bytes<32>>>([pad(32, "gob:id:"), gameId, secret]);
+}
+
+circuit callerMark(gameId: Bytes<32>): Uint<8> {
+  const k = gameKeys.lookup(gameId);
+  const h = playerId(gameId, localSecret());
+  const isX = h == k.idX;
+  const isO = h == k.idO;
+  assert(isX || isO, "caller must prove knowledge of a registered player secret");
+  return isX ? 1 : 2;
+}
+
+// ---------------------------------------------------------------------------
+// Game lifecycle: createGame / joinGame (replaces per-game deploys)
+// ---------------------------------------------------------------------------
+
+export circuit createGame(
+  gameId: Bytes<32>,
+  cX: Bytes<32>,
+  rTokenX: MerkleTreeDigest,
+  rIdxX: MerkleTreeDigest,
+  rRndX: MerkleTreeDigest
+): [] {
+  const gid = disclose(gameId);
+  assert(!gameKeys.member(gid), "gameId already exists");
+  gameKeys.insert(gid, GameKeys {
+    idX: disclose(cX),
+    idO: pad(32, ""),
+    rootX: disclose(rTokenX),
+    rootO: MerkleTreeDigest { field: 0 },
+    rootIdxX: disclose(rIdxX),
+    rootIdxO: MerkleTreeDigest { field: 0 },
+    rootRndX: disclose(rRndX),
+    rootRndO: MerkleTreeDigest { field: 0 }
+  });
+  gameState.insert(gid, GameDyn {
+    turnMark: 1,
+    committedTurns: 0,
+    status: Status.halfOpen,
+    winner: Winner.none,
+    deadline: 0,
+    hasDeadline: false,
+    challengeUntil: 0,
+    hasChallenge: false
+  });
+  boards.insert(gid, default<Map<Uint<16>, Uint<8>>>);
+  tops.insert(gid, default<Map<Uint<16>, Uint<8>>>);
+  actionLogs.insert(gid, default<Map<Uint<16>, Uint<16>>>);
+  reserves.insert(gid, default<Map<Uint<16>, Uint<8>>>);
+  for (const s of 0..4) {
+    reserves.lookup(gid).insert((4 + s) as Uint<16>, 3 as Uint<8>);  // X: 4,5,6,7
+    reserves.lookup(gid).insert((8 + s) as Uint<16>, 3 as Uint<8>);  // O: 8,9,10,11
+  }
+}
+
+export circuit joinGame(
+  gameId: Bytes<32>,
+  cO: Bytes<32>,
+  rTokenO: MerkleTreeDigest,
+  rIdxO: MerkleTreeDigest,
+  rRndO: MerkleTreeDigest
+): [] {
+  const gid = disclose(gameId);
+  assert(gameKeys.member(gid), "no such game");
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.halfOpen, "game already open");
+  const k = gameKeys.lookup(gid);
+  gameKeys.insert(gid, GameKeys {
+    idX: k.idX,
+    idO: disclose(cO),
+    rootX: k.rootX,
+    rootO: disclose(rTokenO),
+    rootIdxX: k.rootIdxX,
+    rootIdxO: disclose(rIdxO),
+    rootRndX: k.rootRndX,
+    rootRndO: disclose(rRndO)
+  });
+  gameState.insert(gid, GameDyn {
+    turnMark: d.turnMark,
+    committedTurns: d.committedTurns,
+    status: Status.inProgress,
+    winner: d.winner,
+    deadline: d.deadline,
+    hasDeadline: d.hasDeadline,
+    challengeUntil: d.challengeUntil,
+    hasChallenge: d.hasChallenge
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Leaf schemes (gameId-bound)
+// ---------------------------------------------------------------------------
+
+circuit tokenLeaf(gid: Bytes<32>, turn: Uint<16>, kind: Uint<8>, cell: Uint<8>, size: Uint<8>, secret: Bytes<32>): Bytes<32> {
+  return persistentHash<TokenPreimage>(
+    TokenPreimage { domainSep: pad(32, "gob:otk:"), gameId: gid, turn: turn, kind: kind, cell: cell, size: size, secret: secret }
+  );
+}
+
+circuit tokenIsUnder(
+  root: MerkleTreeDigest,
+  gid: Bytes<32>,
+  turn: Uint<16>,
+  kind: Uint<8>,
+  cell: Uint<8>,
+  size: Uint<8>,
+  secret: Bytes<32>,
+  path: MerkleTreePath<14, Bytes<32>>
+): Boolean {
+  const leaf = tokenLeaf(gid, turn, kind, cell, size, secret);
+  return path.leaf == leaf
+      && merkleTreePathRoot<14, Bytes<32>>(path).field == root.field;
+}
+
+circuit indexLeaf(gid: Bytes<32>, turn: Uint<16>, slot: Uint<8>, b0: Uint<8>, b1: Uint<8>, b2: Uint<8>, b3: Uint<8>, secret: Bytes<32>): Bytes<32> {
+  return persistentHash<IndexPreimage>(
+    IndexPreimage { domainSep: pad(32, "gob:idx:"), gameId: gid, turn: turn, slot: slot, b0: b0, b1: b1, b2: b2, b3: b3, secret: secret }
+  );
+}
+
+circuit indexIsUnder(
+  root: MerkleTreeDigest,
+  gid: Bytes<32>,
+  turn: Uint<16>,
+  slot: Uint<8>,
+  b0: Uint<8>, b1: Uint<8>, b2: Uint<8>, b3: Uint<8>,
+  secret: Bytes<32>,
+  path: MerkleTreePath<7, Bytes<32>>
+): Boolean {
+  const leaf = indexLeaf(gid, turn, slot, b0, b1, b2, b3, secret);
+  return path.leaf == leaf
+      && merkleTreePathRoot<7, Bytes<32>>(path).field == root.field;
+}
+
+circuit randomLeaf(gid: Bytes<32>, turn: Uint<16>, slot: Uint<8>, b0: Uint<8>, b1: Uint<8>, b2: Uint<8>, b3: Uint<8>, random: Bytes<32>): Bytes<32> {
+  return persistentHash<RandomPreimage>(
+    RandomPreimage { domainSep: pad(32, "gob:rnd:"), gameId: gid, turn: turn, slot: slot, b0: b0, b1: b1, b2: b2, b3: b3, random: random }
+  );
+}
+
+circuit randomIsUnder(
+  root: MerkleTreeDigest,
+  gid: Bytes<32>,
+  turn: Uint<16>,
+  slot: Uint<8>,
+  b0: Uint<8>, b1: Uint<8>, b2: Uint<8>, b3: Uint<8>,
+  random: Bytes<32>,
+  path: MerkleTreePath<11, Bytes<32>>
+): Boolean {
+  const leaf = randomLeaf(gid, turn, slot, b0, b1, b2, b3, random);
+  return path.leaf == leaf
+      && merkleTreePathRoot<11, Bytes<32>>(path).field == root.field;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+// 4-bit joint roll: jk = bIk XOR bRk, v = sum of weighted joint bits.
+// All bits must be 0/1 (asserted by callers). v is uniform on 0..15 when
+// either side's bits are; the action class is REMOVE iff v < 3 (18.75%).
+circuit jointRoll(
+  bI0: Uint<8>, bI1: Uint<8>, bI2: Uint<8>, bI3: Uint<8>,
+  bR0: Uint<8>, bR1: Uint<8>, bR2: Uint<8>, bR3: Uint<8>
+): Uint<8> {
+  const j0 = (bI0 + bR0 == 1) ? 1 as Uint<8> : 0 as Uint<8>;
+  const j1 = (bI1 + bR1 == 1) ? 1 as Uint<8> : 0 as Uint<8>;
+  const j2 = (bI2 + bR2 == 1) ? 1 as Uint<8> : 0 as Uint<8>;
+  const j3 = (bI3 + bR3 == 1) ? 1 as Uint<8> : 0 as Uint<8>;
+  return (j0 + 2 * j1 + 4 * j2 + 8 * j3) as Uint<8>;
+}
+
+// Parity of a turn number in 0..127: X moves on even turns.
+circuit isEvenTurn(t: Uint<16>): Boolean {
+  return (t == 0) || (t == 2) || (t == 4) || (t == 6) || (t == 8) || (t == 10)
+      || (t == 12) || (t == 14) || (t == 16) || (t == 18) || (t == 20) || (t == 22)
+      || (t == 24) || (t == 26) || (t == 28) || (t == 30) || (t == 32) || (t == 34)
+      || (t == 36) || (t == 38) || (t == 40) || (t == 42) || (t == 44) || (t == 46)
+      || (t == 48) || (t == 50) || (t == 52) || (t == 54) || (t == 56) || (t == 58)
+      || (t == 60) || (t == 62) || (t == 64) || (t == 66) || (t == 68) || (t == 70)
+      || (t == 72) || (t == 74) || (t == 76) || (t == 78) || (t == 80) || (t == 82)
+      || (t == 84) || (t == 86) || (t == 88) || (t == 90) || (t == 92) || (t == 94)
+      || (t == 96) || (t == 98) || (t == 100) || (t == 102) || (t == 104) || (t == 106)
+      || (t == 108) || (t == 110) || (t == 112) || (t == 114) || (t == 116) || (t == 118)
+      || (t == 120) || (t == 122) || (t == 124) || (t == 126);
+}
+
+// 4-in-a-row on the 4x4 board: 4 full rows + 4 full columns + 2 diagonals.
+circuit lineWin(m: Uint<8>, t: Vector<16, Uint<8>>): Boolean {
+  return (t[0] == m && t[1] == m && t[2] == m && t[3] == m)        // row 0
+      || (t[4] == m && t[5] == m && t[6] == m && t[7] == m)        // row 1
+      || (t[8] == m && t[9] == m && t[10] == m && t[11] == m)      // row 2
+      || (t[12] == m && t[13] == m && t[14] == m && t[15] == m)    // row 3
+      || (t[0] == m && t[4] == m && t[8] == m && t[12] == m)       // col 0
+      || (t[1] == m && t[5] == m && t[9] == m && t[13] == m)       // col 1
+      || (t[2] == m && t[6] == m && t[10] == m && t[14] == m)      // col 2
+      || (t[3] == m && t[7] == m && t[11] == m && t[15] == m)      // col 3
+      || (t[0] == m && t[5] == m && t[10] == m && t[15] == m)      // diag ↘
+      || (t[3] == m && t[6] == m && t[9] == m && t[12] == m);      // diag ↙
+}
+
+circuit anyTopOf(m: Uint<8>, t: Vector<16, Uint<8>>): Boolean {
+  return (t[0] == m) || (t[1] == m) || (t[2] == m) || (t[3] == m)
+      || (t[4] == m) || (t[5] == m) || (t[6] == m) || (t[7] == m)
+      || (t[8] == m) || (t[9] == m) || (t[10] == m) || (t[11] == m)
+      || (t[12] == m) || (t[13] == m) || (t[14] == m) || (t[15] == m);
+}
+
+// Sparse reads — absent key == empty (0).
+circuit boardAt(gid: Bytes<32>, k: Uint<16>): Uint<8> {
+  if (!boards.lookup(gid).member(k)) { return 0; }
+  return boards.lookup(gid).lookup(k);
+}
+
+circuit topAt(gid: Bytes<32>, c: Uint<16>): Uint<8> {
+  if (!tops.lookup(gid).member(c)) { return 0; }
+  return tops.lookup(gid).lookup(c);
+}
+
+circuit readTops(gid: Bytes<32>): Vector<16, Uint<8>> {
+  return [
+    topAt(gid, 0), topAt(gid, 1), topAt(gid, 2), topAt(gid, 3),
+    topAt(gid, 4), topAt(gid, 5), topAt(gid, 6), topAt(gid, 7),
+    topAt(gid, 8), topAt(gid, 9), topAt(gid, 10), topAt(gid, 11),
+    topAt(gid, 12), topAt(gid, 13), topAt(gid, 14), topAt(gid, 15)
+  ];
+}
+
+circuit takeFromReserve(gid: Bytes<32>, m: Uint<8>, s: Uint<8>): [] {
+  const rk = (m * 4 + s) as Uint<16>;
+  const cur = reserves.lookup(gid).lookup(rk);
+  assert(cur > 0, "no piece of that size left in reserve");
+  reserves.lookup(gid).insert(rk, cur == 3 ? 2 as Uint<8> : (cur == 2 ? 1 as Uint<8> : 0 as Uint<8>));
+}
+
+circuit returnToReserve(gid: Bytes<32>, m: Uint<8>, s: Uint<8>): [] {
+  const rk = (m * 4 + s) as Uint<16>;
+  const cur = reserves.lookup(gid).lookup(rk);
+  assert(cur < 3, "reserve overflow");
+  reserves.lookup(gid).insert(rk, cur == 0 ? 1 as Uint<8> : (cur == 1 ? 2 as Uint<8> : 3 as Uint<8>));
+}
+
+// GameDyn "with" helpers (Compact has no struct-update syntax).
+circuit dynWithWinner(d: GameDyn, w: Winner): GameDyn {
+  return GameDyn {
+    turnMark: d.turnMark, committedTurns: d.committedTurns,
+    status: d.status, winner: w,
+    deadline: d.deadline, hasDeadline: d.hasDeadline,
+    challengeUntil: d.challengeUntil, hasChallenge: d.hasChallenge
+  };
+}
+
+circuit dynSettled(d: GameDyn, w: Winner): GameDyn {
+  return GameDyn {
+    turnMark: d.turnMark, committedTurns: d.committedTurns,
+    status: Status.settled, winner: w,
+    deadline: 0, hasDeadline: false,
+    challengeUntil: 0, hasChallenge: false
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Chunked settle
+// ---------------------------------------------------------------------------
+
+export circuit settle(
+  gameId: Bytes<32>,
+  nMoves: Uint<8>,
+  parities: Vector<8, Uint<8>>,   // claimed CLASS per move: 1=place, 0=remove/pass
+  kinds: Vector<8, Uint<8>>,
+  cells: Vector<8, Uint<8>>,
+  sizes: Vector<8, Uint<8>>,
+  secrets: Vector<8, Bytes<32>>,
+  paths: Vector<8, MerkleTreePath<14, Bytes<32>>>,
+  untilTime: Uint<64>
+): [] {
+  const gid = disclose(gameId);
+  assert(gameKeys.member(gid), "no such game");
+  const d0 = gameState.lookup(gid);
+  assert(d0.status == Status.inProgress, "game is not in progress");
+  assert(d0.winner == Winner.none, "game already decided");
+  const keys = gameKeys.lookup(gid);
+
+  const n = disclose(nMoves);
+  assert(n > 0, "empty chunk");
+  assert(n <= 8, "chunk too large");
+  const base = d0.committedTurns;
+  assert(base + n <= 128, "exceeds max turns");
+  const baseIsEven = isEvenTurn(base as Uint<16>);
+
+  for (const i of 0..8) {
+    if (i < n) {
+      // A win inside this chunk must be the FINAL move of the history.
+      const dCur = gameState.lookup(gid);
+      assert(dCur.winner == Winner.none, "moves after game end");
+
+      const tAbs = (base + i) as Uint<16>;
+      const iIsEven = (i == 0) || (i == 2) || (i == 4) || (i == 6);
+      const isXTurn = iIsEven ? baseIsEven : !baseIsEven;
+      const mark = isXTurn ? 1 as Uint<8> : 2 as Uint<8>;
+      const oppMark = isXTurn ? 2 as Uint<8> : 1 as Uint<8>;
+
+      const kind = disclose(kinds[i]);
+      const cell = disclose(cells[i]);
+      const size = disclose(sizes[i]);
+      const par = disclose(parities[i]);
+
+      assert(par <= 1, "class must be 0 or 1");
+      assert(kind >= 1 && kind <= 3, "unknown action kind");
+      assert(cell < 16, "cell out of range");
+      assert(size < 4, "size out of range");
+      if (tAbs == 0) {
+        assert(kind == 1, "turn 0 must be a placement");
+      }
+      assert((kind == 1 && par == 1) || ((kind == 2 || kind == 3) && par == 0),
+             "action kind inconsistent with claimed class");
+
+      const root = isXTurn ? keys.rootX : keys.rootO;
+      assert(
+        tokenIsUnder(root, gid, tAbs, kind, cell, size, disclose(secrets[i]), disclose(paths[i])),
+        "invalid one-time token for this (turn, action)"
+      );
+
+      if (kind == 1) {
+        // PLACE
+        takeFromReserve(gid, mark, size);
+        assert(size > 0 || boardAt(gid, (cell * 4) as Uint<16>) == 0, "cell occupied at target size");
+        assert(size > 1 || boardAt(gid, (cell * 4 + 1) as Uint<16>) == 0, "a piece of that size or larger is here");
+        assert(size > 2 || boardAt(gid, (cell * 4 + 2) as Uint<16>) == 0, "a piece of that size or larger is here");
+        assert(boardAt(gid, (cell * 4 + 3) as Uint<16>) == 0, "a larger piece occupies this cell");
+        boards.lookup(gid).insert((cell * 4 + size) as Uint<16>, mark);
+        tops.lookup(gid).insert(cell as Uint<16>, mark);
+      }
+      if (kind == 2) {
+        // REMOVE — top must be the opponent's; returns to their reserve.
+        assert(size == 0, "remove uses canonical size 0");
+        const l3 = boardAt(gid, (cell * 4 + 3) as Uint<16>);
+        const l2 = boardAt(gid, (cell * 4 + 2) as Uint<16>);
+        const l1 = boardAt(gid, (cell * 4 + 1) as Uint<16>);
+        const l0 = boardAt(gid, (cell * 4) as Uint<16>);
+        const visible = l3 != 0 ? l3 : (l2 != 0 ? l2 : (l1 != 0 ? l1 : l0));
+        assert(visible == oppMark, "cell's visible piece is not the opponent's");
+        if (l3 != 0) {
+          boards.lookup(gid).insert((cell * 4 + 3) as Uint<16>, 0 as Uint<8>);
+          returnToReserve(gid, oppMark, 3 as Uint<8>);
+          tops.lookup(gid).insert(cell as Uint<16>, l2 != 0 ? l2 : (l1 != 0 ? l1 : l0));
+        } else {
+          if (l2 != 0) {
+            boards.lookup(gid).insert((cell * 4 + 2) as Uint<16>, 0 as Uint<8>);
+            returnToReserve(gid, oppMark, 2 as Uint<8>);
+            tops.lookup(gid).insert(cell as Uint<16>, l1 != 0 ? l1 : l0);
+          } else {
+            if (l1 != 0) {
+              boards.lookup(gid).insert((cell * 4 + 1) as Uint<16>, 0 as Uint<8>);
+              returnToReserve(gid, oppMark, 1 as Uint<8>);
+              tops.lookup(gid).insert(cell as Uint<16>, l0);
+            } else {
+              boards.lookup(gid).insert((cell * 4) as Uint<16>, 0 as Uint<8>);
+              returnToReserve(gid, oppMark, 0 as Uint<8>);
+              tops.lookup(gid).insert(cell as Uint<16>, 0 as Uint<8>);
+            }
+          }
+        }
+      }
+      if (kind == 3) {
+        // PASS: only on a remove-class turn with nothing removable.
+        assert(cell == 0 && size == 0, "pass uses canonical cell 0, size 0");
+      }
+
+      const tw = readTops(gid);
+      if (kind == 3) {
+        assert(!anyTopOf(oppMark, tw), "pass not allowed: an opponent piece is removable");
+      }
+
+      actionLogs.lookup(gid).insert(tAbs, (par * 256 + kind * 64 + size * 16 + cell) as Uint<16>);
+
+      // Win check — mover precedence.
+      const moverWins = lineWin(mark, tw);
+      const oppWins = lineWin(oppMark, tw);
+      if (moverWins) {
+        const dW = gameState.lookup(gid);
+        gameState.insert(gid, dynWithWinner(dW, isXTurn ? Winner.x : Winner.o));
+      } else {
+        if (oppWins) {
+          const dW = gameState.lookup(gid);
+          gameState.insert(gid, dynWithWinner(dW, isXTurn ? Winner.o : Winner.x));
+        }
+      }
+    }
+  }
+
+  const dEnd = gameState.lookup(gid);
+  const newCommitted = (base + n) as Uint<8>;
+  const drawNow = dEnd.winner == Winner.none && newCommitted == 128;
+  const winnerFinal = drawNow ? Winner.draw : dEnd.winner;
+  const nextMark = isEvenTurn(newCommitted as Uint<16>) ? 1 as Uint<8> : 2 as Uint<8>;
+  gameState.insert(gid, GameDyn {
+    turnMark: winnerFinal == Winner.none ? nextMark : dEnd.turnMark,
+    committedTurns: newCommitted,
+    status: dEnd.status,
+    winner: winnerFinal,
+    deadline: dEnd.deadline,
+    hasDeadline: false,
+    challengeUntil: disclose(untilTime),
+    hasChallenge: true
+  });
+}
+
+// Finalise after the challenge window expires. Permissionless.
+export circuit claimResult(gameId: Bytes<32>): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "already settled");
+  assert(d.hasChallenge, "no settlement to finalise");
+  assert(blockTimeGte(d.challengeUntil), "challenge window still open");
+  gameState.insert(gid, GameDyn {
+    turnMark: d.turnMark, committedTurns: d.committedTurns,
+    status: Status.settled, winner: d.winner,
+    deadline: d.deadline, hasDeadline: d.hasDeadline,
+    challengeUntil: 0, hasChallenge: false
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Liveness: timeout / forfeit
+// ---------------------------------------------------------------------------
+
+export circuit startTimeout(gameId: Bytes<32>, untilTime: Uint<64>): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "game is not in progress");
+  const mark = callerMark(gid);
+  assert(mark != d.turnMark, "only the waiting player can start the timeout");
+  assert(blockTimeLt(disclose(untilTime)), "deadline must be in the future");
+  gameState.insert(gid, GameDyn {
+    turnMark: d.turnMark, committedTurns: d.committedTurns,
+    status: d.status, winner: d.winner,
+    deadline: disclose(untilTime), hasDeadline: true,
+    challengeUntil: d.challengeUntil, hasChallenge: d.hasChallenge
+  });
+}
+
+export circuit claimTimeout(gameId: Bytes<32>): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "game is not in progress");
+  assert(d.hasDeadline, "no timeout has been armed");
+  assert(blockTimeGte(d.deadline), "deadline has not been reached yet");
+  gameState.insert(gid, dynSettled(d, d.turnMark == 1 ? Winner.o : Winner.x));
+}
+
+// ---------------------------------------------------------------------------
+// Fraud proof: claimed class contradicts the committed bits
+// ---------------------------------------------------------------------------
+
+export circuit proveWrongParity(
+  gameId: Bytes<32>,
+  turn: Uint<16>,
+  slot: Uint<8>,
+  bI0: Uint<8>, bI1: Uint<8>, bI2: Uint<8>, bI3: Uint<8>,
+  secretI: Bytes<32>, pathI: MerkleTreePath<7, Bytes<32>>,
+  bR0: Uint<8>, bR1: Uint<8>, bR2: Uint<8>, bR3: Uint<8>,
+  randomR: Bytes<32>, pathR: MerkleTreePath<11, Bytes<32>>
+): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "already settled");
+  const t = disclose(turn);
+  assert(t > 0, "turn 0 has no randomness ceremony");
+  assert(actionLogs.lookup(gid).member(t), "turn not committed on-chain");
+  const moverIsX = isEvenTurn(t);
+  const keys = gameKeys.lookup(gid);
+
+  const i0 = disclose(bI0); const i1 = disclose(bI1); const i2 = disclose(bI2); const i3 = disclose(bI3);
+  const r0 = disclose(bR0); const r1 = disclose(bR1); const r2 = disclose(bR2); const r3 = disclose(bR3);
+  assert(i0 <= 1 && i1 <= 1 && i2 <= 1 && i3 <= 1, "I-bits must be 0 or 1");
+  assert(r0 <= 1 && r1 <= 1 && r2 <= 1 && r3 <= 1, "R-bits must be 0 or 1");
+
+  const iRoot = moverIsX ? keys.rootIdxX : keys.rootIdxO;
+  const rRoot = moverIsX ? keys.rootRndO : keys.rootRndX;
+  assert(indexIsUnder(iRoot, gid, t, disclose(slot), i0, i1, i2, i3, disclose(secretI), disclose(pathI)),
+         "index reveal is not under the mover's I-root");
+  assert(randomIsUnder(rRoot, gid, t, disclose(slot), r0, r1, r2, r3, disclose(randomR), disclose(pathR)),
+         "random reveal is not under the responder's R-root");
+
+  const v = jointRoll(i0, i1, i2, i3, r0, r1, r2, r3);
+  const realPlaceClass = v >= 3;                 // v < 3 -> remove class
+  const packed = actionLogs.lookup(gid).lookup(t);
+  const claimedPlaceClass = packed >= 256;
+  assert(claimedPlaceClass != realPlaceClass, "claimed class matches the committed bits");
+
+  gameState.insert(gid, dynSettled(d, moverIsX ? Winner.o : Winner.x));
+}
+
+// ---------------------------------------------------------------------------
+// Fraud proofs: equivocation
+// ---------------------------------------------------------------------------
+
+export circuit proveEquivocationByX(
+  gameId: Bytes<32>,
+  turn: Uint<16>,
+  kindA: Uint<8>, cellA: Uint<8>, sizeA: Uint<8>, secretA: Bytes<32>, pathA: MerkleTreePath<14, Bytes<32>>,
+  kindB: Uint<8>, cellB: Uint<8>, sizeB: Uint<8>, secretB: Bytes<32>, pathB: MerkleTreePath<14, Bytes<32>>
+): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "already settled");
+  const keys = gameKeys.lookup(gid);
+  assert(disclose(kindA) != disclose(kindB) || disclose(cellA) != disclose(cellB) || disclose(sizeA) != disclose(sizeB),
+         "not a fork: same action");
+  assert(tokenIsUnder(keys.rootX, gid, disclose(turn), disclose(kindA), disclose(cellA), disclose(sizeA), disclose(secretA), disclose(pathA)),
+         "token A is not a valid X token");
+  assert(tokenIsUnder(keys.rootX, gid, disclose(turn), disclose(kindB), disclose(cellB), disclose(sizeB), disclose(secretB), disclose(pathB)),
+         "token B is not a valid X token");
+  gameState.insert(gid, dynSettled(d, Winner.o));
+}
+
+export circuit proveEquivocationByO(
+  gameId: Bytes<32>,
+  turn: Uint<16>,
+  kindA: Uint<8>, cellA: Uint<8>, sizeA: Uint<8>, secretA: Bytes<32>, pathA: MerkleTreePath<14, Bytes<32>>,
+  kindB: Uint<8>, cellB: Uint<8>, sizeB: Uint<8>, secretB: Bytes<32>, pathB: MerkleTreePath<14, Bytes<32>>
+): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "already settled");
+  const keys = gameKeys.lookup(gid);
+  assert(disclose(kindA) != disclose(kindB) || disclose(cellA) != disclose(cellB) || disclose(sizeA) != disclose(sizeB),
+         "not a fork: same action");
+  assert(tokenIsUnder(keys.rootO, gid, disclose(turn), disclose(kindA), disclose(cellA), disclose(sizeA), disclose(secretA), disclose(pathA)),
+         "token A is not a valid O token");
+  assert(tokenIsUnder(keys.rootO, gid, disclose(turn), disclose(kindB), disclose(cellB), disclose(sizeB), disclose(secretB), disclose(pathB)),
+         "token B is not a valid O token");
+  gameState.insert(gid, dynSettled(d, Winner.x));
+}
+
+export circuit proveIndexEquivocationByX(
+  gameId: Bytes<32>,
+  turn: Uint<16>,
+  slotA: Uint<8>, a0: Uint<8>, a1: Uint<8>, a2: Uint<8>, a3: Uint<8>, secretA: Bytes<32>, pathA: MerkleTreePath<7, Bytes<32>>,
+  slotB: Uint<8>, b0: Uint<8>, b1: Uint<8>, b2: Uint<8>, b3: Uint<8>, secretB: Bytes<32>, pathB: MerkleTreePath<7, Bytes<32>>
+): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "already settled");
+  const keys = gameKeys.lookup(gid);
+  assert(disclose(slotA) != disclose(slotB)
+      || disclose(a0) != disclose(b0) || disclose(a1) != disclose(b1)
+      || disclose(a2) != disclose(b2) || disclose(a3) != disclose(b3),
+         "not a fork: same index leaf");
+  assert(indexIsUnder(keys.rootIdxX, gid, disclose(turn), disclose(slotA), disclose(a0), disclose(a1), disclose(a2), disclose(a3), disclose(secretA), disclose(pathA)),
+         "index A is not a valid X index leaf");
+  assert(indexIsUnder(keys.rootIdxX, gid, disclose(turn), disclose(slotB), disclose(b0), disclose(b1), disclose(b2), disclose(b3), disclose(secretB), disclose(pathB)),
+         "index B is not a valid X index leaf");
+  gameState.insert(gid, dynSettled(d, Winner.o));
+}
+
+export circuit proveIndexEquivocationByO(
+  gameId: Bytes<32>,
+  turn: Uint<16>,
+  slotA: Uint<8>, a0: Uint<8>, a1: Uint<8>, a2: Uint<8>, a3: Uint<8>, secretA: Bytes<32>, pathA: MerkleTreePath<7, Bytes<32>>,
+  slotB: Uint<8>, b0: Uint<8>, b1: Uint<8>, b2: Uint<8>, b3: Uint<8>, secretB: Bytes<32>, pathB: MerkleTreePath<7, Bytes<32>>
+): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "already settled");
+  const keys = gameKeys.lookup(gid);
+  assert(disclose(slotA) != disclose(slotB)
+      || disclose(a0) != disclose(b0) || disclose(a1) != disclose(b1)
+      || disclose(a2) != disclose(b2) || disclose(a3) != disclose(b3),
+         "not a fork: same index leaf");
+  assert(indexIsUnder(keys.rootIdxO, gid, disclose(turn), disclose(slotA), disclose(a0), disclose(a1), disclose(a2), disclose(a3), disclose(secretA), disclose(pathA)),
+         "index A is not a valid O index leaf");
+  assert(indexIsUnder(keys.rootIdxO, gid, disclose(turn), disclose(slotB), disclose(b0), disclose(b1), disclose(b2), disclose(b3), disclose(secretB), disclose(pathB)),
+         "index B is not a valid O index leaf");
+  gameState.insert(gid, dynSettled(d, Winner.x));
+}
+
+export circuit proveRandomEquivocationByX(
+  gameId: Bytes<32>,
+  turn: Uint<16>,
+  slot: Uint<8>,
+  a0: Uint<8>, a1: Uint<8>, a2: Uint<8>, a3: Uint<8>, randomA: Bytes<32>, pathA: MerkleTreePath<11, Bytes<32>>,
+  b0: Uint<8>, b1: Uint<8>, b2: Uint<8>, b3: Uint<8>, randomB: Bytes<32>, pathB: MerkleTreePath<11, Bytes<32>>
+): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "already settled");
+  const keys = gameKeys.lookup(gid);
+  assert(disclose(a0) != disclose(b0) || disclose(a1) != disclose(b1)
+      || disclose(a2) != disclose(b2) || disclose(a3) != disclose(b3)
+      || disclose(randomA) != disclose(randomB),
+         "not a fork: same random leaf");
+  assert(randomIsUnder(keys.rootRndX, gid, disclose(turn), disclose(slot), disclose(a0), disclose(a1), disclose(a2), disclose(a3), disclose(randomA), disclose(pathA)),
+         "random A is not a valid X random leaf");
+  assert(randomIsUnder(keys.rootRndX, gid, disclose(turn), disclose(slot), disclose(b0), disclose(b1), disclose(b2), disclose(b3), disclose(randomB), disclose(pathB)),
+         "random B is not a valid X random leaf");
+  gameState.insert(gid, dynSettled(d, Winner.o));
+}
+
+export circuit proveRandomEquivocationByO(
+  gameId: Bytes<32>,
+  turn: Uint<16>,
+  slot: Uint<8>,
+  a0: Uint<8>, a1: Uint<8>, a2: Uint<8>, a3: Uint<8>, randomA: Bytes<32>, pathA: MerkleTreePath<11, Bytes<32>>,
+  b0: Uint<8>, b1: Uint<8>, b2: Uint<8>, b3: Uint<8>, randomB: Bytes<32>, pathB: MerkleTreePath<11, Bytes<32>>
+): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "already settled");
+  const keys = gameKeys.lookup(gid);
+  assert(disclose(a0) != disclose(b0) || disclose(a1) != disclose(b1)
+      || disclose(a2) != disclose(b2) || disclose(a3) != disclose(b3)
+      || disclose(randomA) != disclose(randomB),
+         "not a fork: same random leaf");
+  assert(randomIsUnder(keys.rootRndO, gid, disclose(turn), disclose(slot), disclose(a0), disclose(a1), disclose(a2), disclose(a3), disclose(randomA), disclose(pathA)),
+         "random A is not a valid O random leaf");
+  assert(randomIsUnder(keys.rootRndO, gid, disclose(turn), disclose(slot), disclose(b0), disclose(b1), disclose(b2), disclose(b3), disclose(randomB), disclose(pathB)),
+         "random B is not a valid O random leaf");
+  gameState.insert(gid, dynSettled(d, Winner.x));
+}

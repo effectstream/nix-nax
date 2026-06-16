@@ -1,50 +1,40 @@
-// E2E happy path: deploy, play a 5-move X-win game off-chain, settle, claimResult.
-// Requires the local stack (bun run stack:up).
+// E2E happy path (arena): one-time arena deploy for the suite, then a fast
+// createGame/joinGame, a scripted 7-move X-win (4-in-a-row) settled in ONE
+// chunk, and claimResult after the challenge window. Requires the local stack.
 
 import { describe, test, expect } from "vitest";
 import { Status, Winner } from "../../src/contract/managed/contract/index.js";
-import { openChannelTogether } from "../../src/sdk/game/game-session.ts";
+import { playersC } from "../helpers/fixtures.ts";
+import { openGame } from "./driver.ts";
 import { sleep } from "./helpers.ts";
+import { KIND_PLACE } from "../../src/sdk/game/rules.ts";
+
+const P = (cell: number, size: number) => ({ kind: KIND_PLACE as 1, cell, size });
 
 describe("e2e: happy path", () => {
-  test("X wins top row -> settle records winner.x", async () => {
-    const { x, o, contractAddress } = await openChannelTogether();
-    x.setOpponent(o);
-    o.setOpponent(x);
-    console.log("Deployed channel at", contractAddress);
+  test("X wins a full row -> chunked settle records winner.x -> claimResult", async () => {
+    const pair = playersC();
+    const g = await openGame(pair);
+    console.log("Game opened on arena", g.contractAddress);
 
-    // X:0, O:3, X:1, O:4, X:2  — X completes top row.
-    const sequence: [string, number][] = [
-      ["x", 0], ["o", 3], ["x", 1], ["o", 4], ["x", 2],
-    ];
-    for (const [who, cell] of sequence) {
-      const mover = who === "x" ? x : o;
-      const receiver = who === "x" ? o : x;
-      const move = mover.myMove(cell);
-      const verdict = receiver.receiveMove(move);
-      expect(verdict.ok).toBe(true);
-    }
-    expect(x.moves.length).toBe(5);
-    expect(o.moves.length).toBe(5);
+    const challengeWindowSec = 6;
+    const untilTime = BigInt(Math.floor(Date.now() / 1000) + challengeWindowSec);
+    // X fills row 0 (cells 0,1,2,3) over turns 0,2,4,6; O plays 4,5,6.
+    const settleTx = await g.settleChunk(0, [P(0, 0), P(4, 0), P(1, 0), P(5, 0), P(2, 0), P(6, 0), P(3, 1)], untilTime);
+    console.log("settle txId:", settleTx);
 
-    // X submits settle, with a short challenge window (5s).
-    const challengeWindowSec = 4;
-    const settleTxId = await x.settle(challengeWindowSec);
-    console.log("settle txId:", settleTxId);
+    let d = await g.readDyn();
+    expect(d.committedTurns).toBe(7);
+    expect(d.winner).toBe(Winner.x);
+    expect(d.hasChallenge).toBe(true);
+    expect(d.status).toBe(Status.inProgress);
 
-    let led = await x.readState();
-    expect(led.committedTurns).toBe(5n);
-    expect(led.winner).toBe(Winner.x);
-    expect(led.hasChallenge).toBe(true);
-    expect(led.status).toBe(Status.inProgress);
+    await sleep(20_000);
+    const claimTx = await g.claimResult();
+    console.log("claimResult txId:", claimTx);
 
-    // Wait past challenge window, then claimResult.
-    await sleep((challengeWindowSec + 2) * 1000);
-    const claimTxId = await x.claimResult();
-    console.log("claimResult txId:", claimTxId);
-
-    led = await x.readState();
-    expect(led.status).toBe(Status.settled);
-    expect(led.winner).toBe(Winner.x);
+    d = await g.readDyn();
+    expect(d.status).toBe(Status.settled);
+    expect(d.winner).toBe(Winner.x);
   }, 600_000);
 });

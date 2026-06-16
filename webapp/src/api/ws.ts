@@ -1,17 +1,22 @@
 // Relay WebSocket client. Reconnects with backoff. Single-room (one
-// contract address) — the channel is small.
+// contract address). Carries the three off-chain message types: intent,
+// random reveal, and the signed move.
 
-import type { SerializedMove } from "../game/player-session.ts";
+import type { WireIntent, WireRandomReveal, WireSignedMove } from "../game/player-session.ts";
 
 export type WireInbound =
   | { type: "joined"; addr: string; role: "x" | "o" }
   | { type: "left"; addr: string; role: "x" | "o" }
-  | { type: "move"; addr: string; payload: SerializedMove }
+  | { type: "intent"; addr: string; payload: WireIntent }
+  | { type: "random"; addr: string; payload: WireRandomReveal }
+  | { type: "move"; addr: string; payload: WireSignedMove }
   | { type: "event"; addr: string; kind: string };
 
 export type WireOutbound =
   | { type: "join"; addr: string; role: "x" | "o" }
-  | { type: "move"; addr: string; payload: SerializedMove }
+  | { type: "intent"; addr: string; payload: WireIntent }
+  | { type: "random"; addr: string; payload: WireRandomReveal }
+  | { type: "move"; addr: string; payload: WireSignedMove }
   | { type: "event"; addr: string; kind: string }
   | { type: "leave"; addr: string };
 
@@ -45,7 +50,6 @@ export function connectRelay(
     ws.addEventListener("open", () => {
       setStatus("open");
       backoff = 500;
-      // Always (re-)join the room on (re-)connect.
       ws!.send(JSON.stringify({ type: "join", addr, role } satisfies WireOutbound));
       while (queue.length) ws!.send(JSON.stringify(queue.shift()!));
     });

@@ -1,123 +1,105 @@
-// Per-player one-time-token Merkle tree builder.
+// Per-player T-tree: one-time ACTION tokens for the 4×4 stacked-pieces game.
 //
-// Layout — 9 turns × 9 cells = 81 leaves, depth-10 tree (1024 leaves total).
-// Leaf index = turn * 9 + cell. Leaves beyond 81 are zero-bytes (Bytes<32>
-// default).
+// Layout — 128 turns × a 128-slot block per turn, depth-14 tree (16,384
+// leaves). Within a turn's block (4 sizes):
+//   place  = size*16 + cell   (offsets  0..63)
+//   remove = 64 + cell        (offsets 64..79)
+//   pass   = 80               (offset 80)
+// Offsets 81..127 and turns' unused leaves are zero-bytes padding. 81 real
+// tokens per turn × 128 turns = 10,368 secrets.
 //
-// In-circuit verification (TicTacToeChannel.compact `tokenIsUnder`) does:
-//   leaf = persistentHash(TokenPreimage{ domainSep, turn, cell, secret })
-//   assert path.leaf == leaf
-//   assert merkleTreePathRoot(path).field == root.field
-//
-// `merkleTreePathRoot` itself uses persistentHash(LeafPreimage{ "mdn:lh", leaf })
-// (degraded to Field) as the bottom of the path, then folds entries with
-// transientHash([left, right]). We mirror this exactly in
-// `persistent-hash.ts`'s `merklePathRootField` / `combinePathEntry`.
+// Leaf preimage binds the SEMANTICS (turn, kind, cell, size) — the position
+// in the tree is just a client convention, exactly like the tic-tac-toe
+// version. In-circuit verification: GobbletChannel.compact `tokenIsUnder`.
 
 import {
   computeTokenLeaf,
-  hashLeafToField,
-  combinePathEntry,
+  buildMerkleLevels,
+  pathFromLevels,
   merklePathRootField,
   randomBytes32,
+  type MerklePath,
+  type PathEntry,
 } from "./persistent-hash.ts";
+import { KIND_PLACE, KIND_REMOVE, KIND_PASS, MAX_TURNS, CELLS, SIZES } from "../game/rules.ts";
 
-export const TREE_DEPTH = 10;
-export const TREE_SIZE = 1 << TREE_DEPTH; // 1024
-export const TURNS = 9;
-export const CELLS = 9;
-export const TOKEN_COUNT = TURNS * CELLS; // 81
+export type { MerklePath, PathEntry };
 
-export type PathEntry = { sibling: { field: bigint }; goes_left: boolean };
-export type MerklePath = { leaf: Uint8Array; path: PathEntry[] };
+export const TOKEN_TREE_DEPTH = 14;
+export const TOKEN_TREE_SIZE = 1 << TOKEN_TREE_DEPTH; // 16384
+export const ACTION_BLOCK = 128;                       // slots per turn
+export const ACTIONS_PER_TURN = 81;                    // 64 places + 16 removes + 1 pass
+
+// Offset of an action inside its turn block.
+export function actionOffset(kind: number, cell: number, size: number): number {
+  if (kind === KIND_PLACE) {
+    if (cell < 0 || cell >= CELLS || size < 0 || size >= SIZES) throw new Error("bad place action");
+    return size * 16 + cell;
+  }
+  if (kind === KIND_REMOVE) {
+    if (cell < 0 || cell >= CELLS) throw new Error("bad remove action");
+    return 64 + cell;
+  }
+  if (kind === KIND_PASS) return 80;
+  throw new Error(`unknown kind ${kind}`);
+}
+
+// Inverse of actionOffset (canonical cell/size for remove/pass).
+export function actionFromOffset(offset: number): { kind: number; cell: number; size: number } {
+  if (offset >= 0 && offset < 64) return { kind: KIND_PLACE, cell: offset % 16, size: Math.floor(offset / 16) };
+  if (offset >= 64 && offset < 80) return { kind: KIND_REMOVE, cell: offset - 64, size: 0 };
+  if (offset === 80) return { kind: KIND_PASS, cell: 0, size: 0 };
+  throw new Error(`offset ${offset} is not a real action slot`);
+}
 
 export type TokenTree = {
-  // root.field — matches the in-circuit MerkleTreeDigest.
+  gameId: Uint8Array;
   root: { field: bigint };
-  // secrets[turn][cell] -> the 32-byte secret used as the token preimage.
+  // secrets[turn][offset] for offset 0..80 — rebuildable serialization unit.
   secrets: Uint8Array[][];
-  // Build a Merkle path for (turn, cell) suitable for circuit consumption.
-  pathFor: (turn: number, cell: number) => MerklePath;
+  pathFor: (turn: number, kind: number, cell: number, size: number) => MerklePath;
 };
 
-export function buildTokenTree(rng: () => Uint8Array = randomBytes32): TokenTree {
-  // Sample 81 secrets.
+// rng is consumed in (turn-major, offset 0..80) order — 10,368 calls. Leaves
+// bind the gameId so tokens can never replay across games.
+export function buildTokenTree(gameId: Uint8Array, rng: () => Uint8Array = randomBytes32): TokenTree {
   const secrets: Uint8Array[][] = [];
-  for (let t = 0; t < TURNS; t++) {
+  for (let t = 0; t < MAX_TURNS; t++) {
     secrets[t] = [];
-    for (let c = 0; c < CELLS; c++) {
-      secrets[t][c] = rng();
+    for (let off = 0; off < ACTIONS_PER_TURN; off++) {
+      secrets[t][off] = rng();
     }
   }
 
-  // Leaf bytes for indices 0..80; pad to 1024 with 32-byte zero buffers.
-  const leafBytes: Uint8Array[] = new Array(TREE_SIZE);
-  for (let i = 0; i < TREE_SIZE; i++) {
-    if (i < TOKEN_COUNT) {
-      const t = Math.floor(i / CELLS);
-      const c = i % CELLS;
-      leafBytes[i] = computeTokenLeaf(t, c, secrets[t][c]);
-    } else {
-      leafBytes[i] = new Uint8Array(32);
+  const leafBytes: Uint8Array[] = new Array(TOKEN_TREE_SIZE);
+  const zero = new Uint8Array(32);
+  for (let i = 0; i < TOKEN_TREE_SIZE; i++) leafBytes[i] = zero;
+  for (let t = 0; t < MAX_TURNS; t++) {
+    for (let off = 0; off < ACTIONS_PER_TURN; off++) {
+      const { kind, cell, size } = actionFromOffset(off);
+      leafBytes[t * ACTION_BLOCK + off] = computeTokenLeaf(gameId, t, kind, cell, size, secrets[t][off]);
     }
   }
 
-  // Bottom level: each leaf hashed into a Field via the std-lib leaf-hash step.
-  // Stored bottom-up: level 0 = leaves (size 1024), level 10 = root (size 1).
-  const levels: bigint[][] = [];
-  levels[0] = leafBytes.map(hashLeafToField);
-  for (let depth = 1; depth <= TREE_DEPTH; depth++) {
-    const prev = levels[depth - 1];
-    const cur: bigint[] = new Array(prev.length / 2);
-    for (let i = 0; i < cur.length; i++) {
-      // Path-entry combine: at this level, the left child is index 2i, right is 2i+1.
-      // For the canonical full-tree root computation we need to combine in the
-      // same way the path verification does. The path verification folds
-      // from a single leaf upward, so we replicate that by hashing pairs.
-      //
-      // The path traversal treats `goes_left = true` to mean "we are the left
-      // child" (i.e., the recursive digest is the LEFT operand and the sibling
-      // is the RIGHT). Symmetric: combinePathEntry with a synthetic entry.
-      const leftField = prev[2 * i];
-      const rightField = prev[2 * i + 1];
-      // Use combinePathEntry with goes_left=true so leftField is the running
-      // digest and rightField is the sibling.
-      cur[i] = combinePathEntry(leftField, { sibling: { field: rightField }, goes_left: true });
-    }
-    levels[depth] = cur;
-  }
-  const root = { field: levels[TREE_DEPTH][0] };
+  const levels = buildMerkleLevels(leafBytes, TOKEN_TREE_DEPTH);
+  const root = { field: levels[TOKEN_TREE_DEPTH][0] };
 
-  const pathFor = (turn: number, cell: number): MerklePath => {
-    if (turn < 0 || turn >= TURNS) throw new Error("turn out of range");
-    if (cell < 0 || cell >= CELLS) throw new Error("cell out of range");
-    const leafIndex = turn * CELLS + cell;
-    const leaf = leafBytes[leafIndex];
-
-    // Build the merkle path: at each level, sibling is at index xor 1.
-    let idx = leafIndex;
-    const path: PathEntry[] = [];
-    for (let depth = 0; depth < TREE_DEPTH; depth++) {
-      const siblingIdx = idx ^ 1;
-      const goesLeft = (idx & 1) === 0; // current node is the LEFT child
-      path.push({
-        sibling: { field: levels[depth][siblingIdx] },
-        goes_left: goesLeft,
-      });
-      idx = idx >>> 1;
-    }
-    return { leaf, path };
+  const pathFor = (turn: number, kind: number, cell: number, size: number): MerklePath => {
+    if (turn < 0 || turn >= MAX_TURNS) throw new Error("turn out of range");
+    const off = actionOffset(kind, cell, size);
+    return pathFromLevels(levels, leafBytes, turn * ACTION_BLOCK + off, TOKEN_TREE_DEPTH);
   };
 
-  // Sanity: re-derive the root from the first leaf path; must equal computed root.
-  // (Cheap insurance — costs ~30 hashes, runs once at construction.)
-  const firstPath = pathFor(0, 0);
-  const derived = merklePathRootField(firstPath.leaf, firstPath.path);
-  if (derived !== root.field) {
-    throw new Error(
-      `internal: tree root inconsistency. derived=${derived.toString(16)} stored=${root.field.toString(16)}`
-    );
+  // Sanity: derive the root from one real path.
+  const p0 = pathFor(0, KIND_PLACE, 0, 0);
+  if (merklePathRootField(p0.leaf, p0.path) !== root.field) {
+    throw new Error("internal: T-tree root inconsistency");
   }
 
-  return { root, secrets, pathFor };
+  return { gameId, root, secrets, pathFor };
+}
+
+// Secret for a specific action — convenience for move building.
+export function secretFor(tree: TokenTree, turn: number, kind: number, cell: number, size: number): Uint8Array {
+  return tree.secrets[turn][actionOffset(kind, cell, size)];
 }

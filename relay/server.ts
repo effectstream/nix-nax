@@ -1,22 +1,27 @@
-// Tic-tac-toe relay + thin chain backend.
+// Arena relay + thin chain backend.
 //
-//   HTTP (REST/JSON):  on-chain actions (deploy / settle / dispute / read state)
-//   WS  (per-room):    off-chain SignedMove exchange between the two players
+//   HTTP (REST/JSON):  on-chain actions (create/join game, settle, disputes)
+//   WS  (per-room):    off-chain message exchange (intent / random / move)
 //
-// The relay holds ONE genesis-funded wallet at startup and reuses it for
-// every contract call (the contract distinguishes players cryptographically,
-// not by wallet identity). Players' identity secrets live in their browsers.
+// The relay deploys the multi-game GobbletArena contract ONCE at boot (or
+// reuses a persisted deployment) and caches the call handle — every game is
+// a fast circuit call afterwards. Rooms and all endpoints are keyed by the
+// 32-byte gameId (hex); the contract address never leaves the relay.
 
 import { buildAndFundWallet, type WalletBundle } from "../src/sdk/wallet.ts";
 import { NETWORK } from "../src/sdk/env.ts";
-import { attachTicTacToe, deployTicTacToe, joinChannelCall, readLedger } from "../src/sdk/deploy.ts";
-import { createTicTacToePrivateState } from "../src/contract/witnesses.ts";
-import { Status, Winner } from "../src/contract/managed/contract/index.js";
+import {
+  ensureArenaDeployed,
+  attachWithSecret,
+  readLedger,
+  buildDustlessCallTxHex,
+  type ArenaHandle,
+} from "../src/sdk/deploy.ts";
 
 const PORT = Number(process.env.RELAY_PORT ?? 4310);
 const log = (...args: unknown[]) => console.log(new Date().toISOString().slice(11, 19), ...args);
 
-// ── Boot: build the shared wallet once. ───────────────────────────────────
+// ── Boot: wallet + one-time arena deployment. ──────────────────────────────
 
 log("relay: booting; waiting for stack and wallet…");
 const wallet: WalletBundle = await buildAndFundWallet(
@@ -26,16 +31,14 @@ const wallet: WalletBundle = await buildAndFundWallet(
 );
 log("relay: wallet ready");
 
-// ── Per-contract serialisation: prevents two concurrent calls from racing
-//    the wallet nonce / contract state.
+const arena: ArenaHandle = await ensureArenaDeployed({ wallet });
+log(`relay: arena ${arena.reused ? "reused" : "deployed"} at ${arena.contractAddress}`);
+
+// ── Single-wallet serialization: one nonce/UTXO stream → one queue. ────────
 const queues = new Map<string, Promise<unknown>>();
 function withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const prev = queues.get(key) ?? Promise.resolve();
   const next = prev.then(fn, fn);
-  // Keep the chain alive without propagating rejections into the queue —
-  // otherwise a failed circuit call leaves an unhandled rejection that
-  // takes the process down. The route handler awaits `next` directly and
-  // surfaces the error via its own try/catch.
   const guarded = next.catch(() => undefined);
   guarded.then(() => {
     if (queues.get(key) === guarded) queues.delete(key);
@@ -44,8 +47,6 @@ function withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
-// Belt-and-braces: any unhandled rejection from the SDK's internals (e.g.
-// graphql-ws sockets) should NOT crash the relay.
 process.on("unhandledRejection", (reason) => {
   console.error("[relay] unhandledRejection:", reason instanceof Error ? reason.message : reason);
 });
@@ -53,7 +54,7 @@ process.on("uncaughtException", (err) => {
   console.error("[relay] uncaughtException:", err.message);
 });
 
-// ── Codecs (browser-friendly JSON ↔ runtime types). ────────────────────────
+// ── Codecs. ─────────────────────────────────────────────────────────────────
 
 const fromHex = (s: string): Uint8Array => {
   const h = (s.startsWith("0x") ? s.slice(2) : s).match(/.{1,2}/g) ?? [];
@@ -73,7 +74,18 @@ function decodePath(p: WirePath): { leaf: Uint8Array; path: { sibling: { field: 
   };
 }
 
-// ── Rooms (WS broadcast between two players sharing a contractAddress). ────
+const gid = (s: string): Uint8Array => {
+  const b = fromHex(s);
+  if (b.length !== 32) throw new Error("gameId must be 32 bytes of hex");
+  return b;
+};
+
+const bits4 = (xs: number[]): [bigint, bigint, bigint, bigint] => {
+  if (!Array.isArray(xs) || xs.length !== 4) throw new Error("bits must be a 4-element array");
+  return [BigInt(xs[0]), BigInt(xs[1]), BigInt(xs[2]), BigInt(xs[3])];
+};
+
+// ── Rooms (WS broadcast between two players sharing a gameId). ─────────────
 
 type RoomRole = "x" | "o";
 interface RoomClient {
@@ -82,14 +94,14 @@ interface RoomClient {
 }
 interface Room {
   clients: Map<RoomRole, RoomClient>;
-  history: { type: "move"; payload: unknown }[]; // last move per turn, in order
+  history: { type: "intent" | "random" | "move"; payload: unknown }[];
 }
 const rooms = new Map<string, Room>();
-function getRoom(addr: string): Room {
-  let r = rooms.get(addr);
+function getRoom(gameId: string): Room {
+  let r = rooms.get(gameId);
   if (!r) {
     r = { clients: new Map(), history: [] };
-    rooms.set(addr, r);
+    rooms.set(gameId, r);
   }
   return r;
 }
@@ -103,8 +115,13 @@ function broadcast(room: Room, except: RoomRole | null, payload: object) {
     }
   }
 }
+function broadcastEvent(gameId: string, kind: string) {
+  const room = rooms.get(gameId);
+  if (!room) return;
+  broadcast(room, null, { type: "event", addr: gameId, kind });
+}
 
-// ── HTTP route table. ──────────────────────────────────────────────────────
+// ── HTTP route table. ───────────────────────────────────────────────────────
 
 type HttpHandler = (req: Request, params: Record<string, string>) => Promise<Response>;
 const routes: { method: string; pattern: RegExp; keys: string[]; handler: HttpHandler }[] = [];
@@ -133,198 +150,301 @@ function corsHeaders() {
   };
 }
 
-// ── Phase 1: deploy with X's commitments only. ────────────────────────────
-route("POST", "/api/deploy", async (req) => {
-  const body = (await req.json()) as { idX: string; rootX: string };
-  const args = {
-    idX: fromHex(body.idX),
-    rootX: { field: fieldBig(body.rootX) },
+// ── Game lifecycle. ─────────────────────────────────────────────────────────
+
+route("POST", "/api/create-game", async (req) => {
+  const body = (await req.json()) as {
+    gameId: string;
+    idX: string;
+    rootX: string;
+    rootIdxX: string;
+    rootRndX: string;
+    gasPayer?: "wallet" | "relay";
   };
-  const initialPrivateState = createTicTacToePrivateState(new Uint8Array(32));
-  return withLock("__deploy__", async () => {
-    log("deploy: starting (halfOpen)…");
-    const { contractAddress } = await deployTicTacToe({
-      args,
-      wallet,
-      initialPrivateState,
-      privateStateStoreName: "ttt-relay-deploy",
-      midnightDbName: "tictactoe-relay-db-deploy",
-    });
-    log("deploy: ok ->", contractAddress);
-    return json({ ok: true, contractAddress });
+  const args = [
+    gid(body.gameId),
+    fromHex(body.idX),
+    { field: fieldBig(body.rootX) },
+    { field: fieldBig(body.rootIdxX) },
+    { field: fieldBig(body.rootRndX) },
+  ];
+  // gasPayer "wallet": return a dust-less proven tx for the player's browser
+  // wallet to balance + submit (they pay gas). No nonce here → no wallet lock.
+  if (body.gasPayer === "wallet") {
+    log("create-game (wallet-pays) ->", body.gameId.slice(0, 12));
+    const txHex = await buildDustlessCallTxHex(arena, "createGame", args);
+    return json({ ok: true, txHex, gameId: body.gameId });
+  }
+  return withLock("__wallet__", async () => {
+    log("create-game ->", body.gameId.slice(0, 12));
+    const tx = await (arena.found as any).callTx.createGame(...args);
+    log("create-game: tx", tx.public.txId);
+    return json({ ok: true, txId: tx.public.txId, gameId: body.gameId });
   });
 });
 
-// ── Phase 2: O joins by submitting their own commitments. ────────────────
 route("POST", "/api/join", async (req) => {
-  const body = (await req.json()) as { addr: string; idO: string; rootO: string };
-  return withLock(body.addr, async () => {
-    log("join: starting ->", body.addr);
-    const { txId } = await joinChannelCall({
-      contractAddress: body.addr,
-      wallet,
-      joinArgs: { idO: fromHex(body.idO), rootO: { field: fieldBig(body.rootO) } },
-    });
-    log("join: tx", txId);
-    broadcastEvent(body.addr, "joined");
-    return json({ ok: true, txId });
+  const body = (await req.json()) as {
+    gameId: string;
+    idO: string;
+    rootO: string;
+    rootIdxO: string;
+    rootRndO: string;
+    gasPayer?: "wallet" | "relay";
+  };
+  const args = [
+    gid(body.gameId),
+    fromHex(body.idO),
+    { field: fieldBig(body.rootO) },
+    { field: fieldBig(body.rootIdxO) },
+    { field: fieldBig(body.rootRndO) },
+  ];
+  if (body.gasPayer === "wallet") {
+    log("join (wallet-pays) ->", body.gameId.slice(0, 12));
+    const txHex = await buildDustlessCallTxHex(arena, "joinGame", args);
+    return json({ ok: true, txHex });
+  }
+  return withLock("__wallet__", async () => {
+    log("join ->", body.gameId.slice(0, 12));
+    const tx = await (arena.found as any).callTx.joinGame(...args);
+    log("join: tx", tx.public.txId);
+    broadcastEvent(body.gameId, "joined");
+    return json({ ok: true, txId: tx.public.txId });
   });
 });
 
-// ── Read on-chain state. ──────────────────────────────────────────────────
-route("GET", "/api/state/:addr", async (_req, { addr }) => {
-  const { providers } = await attachTicTacToe({
-    contractAddress: addr,
-    wallet,
-    initialPrivateState: createTicTacToePrivateState(new Uint8Array(32)),
-    privateStateStoreName: `ttt-relay-read-${addr.slice(2, 12)}`,
-    midnightDbName: `tictactoe-relay-db-read-${addr.slice(2, 12)}`,
-  });
-  const led = await readLedger(providers, addr);
+// ── Read per-game on-chain state. ───────────────────────────────────────────
+
+route("GET", "/api/state/:gameId", async (_req, { gameId }) => {
+  const g = gid(gameId);
+  const led = await readLedger(arena.providers, arena.contractAddress);
+  if (!led.gameKeys.member(g)) return fail("no such game", 404);
+  const keys = led.gameKeys.lookup(g);
+  const dyn = led.gameState.lookup(g);
+
+  const innerBoard = led.boards.lookup(g);
+  const board: number[] = [];
+  for (let k = 0; k < 64; k++) {  // 16 cells × 4 layers
+    const key = BigInt(k);
+    board.push(innerBoard.member(key) ? Number(innerBoard.lookup(key)) : 0);
+  }
+  const innerTops = led.tops.lookup(g);
+  const topsArr: number[] = [];
+  for (let c = 0; c < 16; c++) {
+    const key = BigInt(c);
+    topsArr.push(innerTops.member(key) ? Number(innerTops.lookup(key)) : 0);
+  }
+  const innerRes = led.reserves.lookup(g);
+  const reservesObj: Record<string, number> = {};
+  for (const mark of [1, 2]) {
+    for (let s = 0; s < 4; s++) {
+      const key = BigInt(mark * 4 + s);
+      reservesObj[`${mark === 1 ? "x" : "o"}${s}`] = innerRes.member(key) ? Number(innerRes.lookup(key)) : 0;
+    }
+  }
+  const innerLog = led.actionLogs.lookup(g);
+  const actionLog: { turn: number; packed: number }[] = [];
+  for (const [turn, packed] of innerLog) {
+    actionLog.push({ turn: Number(turn), packed: Number(packed) });
+  }
+  actionLog.sort((a, b) => a.turn - b.turn);
+
   return json({
     ok: true,
-    contractAddress: addr,
-    status: led.status,            // 0=halfOpen, 1=inProgress, 2=settled
-    statusName: ["halfOpen", "inProgress", "settled"][led.status] ?? `?(${led.status})`,
-    winner: led.winner,            // 0=none, 1=x, 2=o, 3=draw
-    winnerName: ["none", "x", "o", "draw"][led.winner],
-    idX: toHex(led.idX),
-    idO: toHex(led.idO),
-    rootX: "0x" + led.rootX.field.toString(16),
-    rootO: "0x" + led.rootO.field.toString(16),
-    committedTurns: Number(led.committedTurns),
-    turnMark: Number(led.turnMark),
-    hasChallenge: led.hasChallenge,
-    challengeUntil: led.challengeUntil.toString(),
-    hasDeadline: led.hasDeadline,
-    deadline: led.deadline.toString(),
+    gameId,
+    status: dyn.status,
+    statusName: ["halfOpen", "inProgress", "settled"][dyn.status] ?? `?(${dyn.status})`,
+    winner: dyn.winner,
+    winnerName: ["none", "x", "o", "draw"][dyn.winner],
+    idX: toHex(keys.idX),
+    idO: toHex(keys.idO),
+    rootX: "0x" + keys.rootX.field.toString(16),
+    rootO: "0x" + keys.rootO.field.toString(16),
+    rootIdxX: "0x" + keys.rootIdxX.field.toString(16),
+    rootIdxO: "0x" + keys.rootIdxO.field.toString(16),
+    rootRndX: "0x" + keys.rootRndX.field.toString(16),
+    rootRndO: "0x" + keys.rootRndO.field.toString(16),
+    committedTurns: Number(dyn.committedTurns),
+    turnMark: Number(dyn.turnMark),
+    hasChallenge: dyn.hasChallenge,
+    challengeUntil: dyn.challengeUntil.toString(),
+    hasDeadline: dyn.hasDeadline,
+    deadline: dyn.deadline.toString(),
+    board,
+    tops: topsArr,
+    reserves: reservesObj,
+    actionLog,
   });
 });
 
-// ── Settle. ────────────────────────────────────────────────────────────────
+// ── Settle (one chunk of up to 8 moves). ────────────────────────────────────
+
 route("POST", "/api/settle", async (req) => {
   const body = (await req.json()) as {
-    addr: string;
-    secret: string;                      // hex; needed only for startTimeout, but we accept it for symmetry
+    gameId: string;
+    secret: string;
     nMoves: number;
-    cells: number[];                      // length 9 (padded)
-    secrets: string[];                    // length 9, hex
-    paths: WirePath[];                    // length 9
-    untilTime: string;                    // bigint string
+    parities: number[];
+    kinds: number[];
+    cells: number[];
+    sizes: number[];
+    secrets: string[];
+    paths: WirePath[];
+    untilTime: string;
   };
-  const addr = body.addr;
-  return withLock(addr, async () => {
-    const { found } = await attachTicTacToe({
-      contractAddress: addr,
-      wallet,
-      initialPrivateState: createTicTacToePrivateState(fromHex(body.secret)),
-      privateStateStoreName: `ttt-relay-settle-${addr.slice(2, 12)}`,
-      midnightDbName: `tictactoe-relay-db-settle-${addr.slice(2, 12)}`,
-    });
-    const cells = body.cells.map((c) => BigInt(c));
-    const secrets = body.secrets.map(fromHex);
-    const paths = body.paths.map(decodePath);
-    const nMoves = BigInt(body.nMoves);
-    const untilTime = BigInt(body.untilTime);
-    log("settle ->", { addr, nMoves: Number(nMoves), untilTime: body.untilTime });
-    const tx = await (found as any).callTx.settle(nMoves, cells, secrets, paths, untilTime);
+  return withLock("__wallet__", async () => {
+    const toBig = (xs: number[]) => xs.map((v) => BigInt(v));
+    log("settle ->", body.gameId.slice(0, 12), "nMoves:", body.nMoves);
+    const tx = await (arena.found as any).callTx.settle(
+      gid(body.gameId),
+      BigInt(body.nMoves),
+      toBig(body.parities),
+      toBig(body.kinds),
+      toBig(body.cells),
+      toBig(body.sizes),
+      body.secrets.map(fromHex),
+      body.paths.map(decodePath),
+      BigInt(body.untilTime),
+    );
     log("settle: tx", tx.public.txId);
-    broadcastEvent(addr, "settled");
+    broadcastEvent(body.gameId, "settled");
     return json({ ok: true, txId: tx.public.txId });
   });
 });
 
 route("POST", "/api/claim-result", async (req) => {
-  const body = (await req.json()) as { addr: string };
-  return withLock(body.addr, async () => {
-    const { found } = await attachTicTacToe({
-      contractAddress: body.addr,
-      wallet,
-      initialPrivateState: createTicTacToePrivateState(new Uint8Array(32)),
-      privateStateStoreName: `ttt-relay-cr-${body.addr.slice(2, 12)}`,
-      midnightDbName: `tictactoe-relay-db-cr-${body.addr.slice(2, 12)}`,
-    });
-    log("claim-result ->", body.addr);
-    const tx = await (found as any).callTx.claimResult();
+  const body = (await req.json()) as { gameId: string };
+  return withLock("__wallet__", async () => {
+    log("claim-result ->", body.gameId.slice(0, 12));
+    const tx = await (arena.found as any).callTx.claimResult(gid(body.gameId));
     log("claim-result: tx", tx.public.txId);
-    broadcastEvent(body.addr, "result-claimed");
+    broadcastEvent(body.gameId, "result-claimed");
     return json({ ok: true, txId: tx.public.txId });
   });
 });
 
 route("POST", "/api/start-timeout", async (req) => {
-  const body = (await req.json()) as { addr: string; secret: string; untilTime: string };
-  return withLock(body.addr, async () => {
-    const { found } = await attachTicTacToe({
-      contractAddress: body.addr,
+  const body = (await req.json()) as { gameId: string; secret: string; untilTime: string };
+  return withLock("__wallet__", async () => {
+    // startTimeout consumes the localSecret witness — attach with the
+    // caller's secret in private state for this one call.
+    const { found } = await attachWithSecret({
+      contractAddress: arena.contractAddress,
       wallet,
-      initialPrivateState: createTicTacToePrivateState(fromHex(body.secret)),
-      privateStateStoreName: `ttt-relay-st-${body.addr.slice(2, 12)}`,
-      midnightDbName: `tictactoe-relay-db-st-${body.addr.slice(2, 12)}`,
+      secret: fromHex(body.secret),
+      storeSuffix: `st-${body.gameId.slice(0, 10)}`,
     });
-    log("start-timeout ->", body.addr, "until", body.untilTime);
-    const tx = await (found as any).callTx.startTimeout(BigInt(body.untilTime));
+    log("start-timeout ->", body.gameId.slice(0, 12), "until", body.untilTime);
+    const tx = await (found as any).callTx.startTimeout(gid(body.gameId), BigInt(body.untilTime));
     log("start-timeout: tx", tx.public.txId);
-    broadcastEvent(body.addr, "timeout-armed");
+    broadcastEvent(body.gameId, "timeout-armed");
     return json({ ok: true, txId: tx.public.txId });
   });
 });
 
 route("POST", "/api/claim-timeout", async (req) => {
-  const body = (await req.json()) as { addr: string };
-  return withLock(body.addr, async () => {
-    const { found } = await attachTicTacToe({
-      contractAddress: body.addr,
-      wallet,
-      initialPrivateState: createTicTacToePrivateState(new Uint8Array(32)),
-      privateStateStoreName: `ttt-relay-ct-${body.addr.slice(2, 12)}`,
-      midnightDbName: `tictactoe-relay-db-ct-${body.addr.slice(2, 12)}`,
-    });
-    log("claim-timeout ->", body.addr);
-    const tx = await (found as any).callTx.claimTimeout();
+  const body = (await req.json()) as { gameId: string };
+  return withLock("__wallet__", async () => {
+    log("claim-timeout ->", body.gameId.slice(0, 12));
+    const tx = await (arena.found as any).callTx.claimTimeout(gid(body.gameId));
     log("claim-timeout: tx", tx.public.txId);
-    broadcastEvent(body.addr, "timeout-claimed");
+    broadcastEvent(body.gameId, "timeout-claimed");
     return json({ ok: true, txId: tx.public.txId });
   });
 });
+
+// ── Fraud proofs. ───────────────────────────────────────────────────────────
 
 route("POST", "/api/prove-fraud", async (req) => {
   const body = (await req.json()) as {
-    addr: string; side: "x" | "o";
+    gameId: string; side: "x" | "o";
     turn: number;
-    cellA: number; secretA: string; pathA: WirePath;
-    cellB: number; secretB: string; pathB: WirePath;
+    kindA: number; cellA: number; sizeA: number; secretA: string; pathA: WirePath;
+    kindB: number; cellB: number; sizeB: number; secretB: string; pathB: WirePath;
   };
-  return withLock(body.addr, async () => {
-    const { found } = await attachTicTacToe({
-      contractAddress: body.addr,
-      wallet,
-      initialPrivateState: createTicTacToePrivateState(new Uint8Array(32)),
-      privateStateStoreName: `ttt-relay-pf-${body.addr.slice(2, 12)}`,
-      midnightDbName: `tictactoe-relay-db-pf-${body.addr.slice(2, 12)}`,
-    });
-    log("prove-fraud ->", body.addr, "side=", body.side);
+  return withLock("__wallet__", async () => {
+    log("prove-fraud ->", body.gameId.slice(0, 12), "side=", body.side, "turn=", body.turn);
     const fn = body.side === "x" ? "proveEquivocationByX" : "proveEquivocationByO";
-    const tx = await (found as any).callTx[fn](
+    const tx = await (arena.found as any).callTx[fn](
+      gid(body.gameId),
       BigInt(body.turn),
-      BigInt(body.cellA), fromHex(body.secretA), decodePath(body.pathA),
-      BigInt(body.cellB), fromHex(body.secretB), decodePath(body.pathB),
+      BigInt(body.kindA), BigInt(body.cellA), BigInt(body.sizeA), fromHex(body.secretA), decodePath(body.pathA),
+      BigInt(body.kindB), BigInt(body.cellB), BigInt(body.sizeB), fromHex(body.secretB), decodePath(body.pathB),
     );
     log("prove-fraud: tx", tx.public.txId);
-    broadcastEvent(body.addr, "fraud-proved");
+    broadcastEvent(body.gameId, "fraud-proved");
     return json({ ok: true, txId: tx.public.txId });
   });
 });
 
-// ── WebSocket relay. ───────────────────────────────────────────────────────
+route("POST", "/api/prove-index-fraud", async (req) => {
+  const body = (await req.json()) as {
+    gameId: string; side: "x" | "o";
+    turn: number;
+    slotA: number; bitsA: number[]; secretA: string; pathA: WirePath;
+    slotB: number; bitsB: number[]; secretB: string; pathB: WirePath;
+  };
+  return withLock("__wallet__", async () => {
+    log("prove-index-fraud ->", body.gameId.slice(0, 12), "side=", body.side);
+    const fn = body.side === "x" ? "proveIndexEquivocationByX" : "proveIndexEquivocationByO";
+    const tx = await (arena.found as any).callTx[fn](
+      gid(body.gameId),
+      BigInt(body.turn),
+      BigInt(body.slotA), ...bits4(body.bitsA), fromHex(body.secretA), decodePath(body.pathA),
+      BigInt(body.slotB), ...bits4(body.bitsB), fromHex(body.secretB), decodePath(body.pathB),
+    );
+    log("prove-index-fraud: tx", tx.public.txId);
+    broadcastEvent(body.gameId, "fraud-proved");
+    return json({ ok: true, txId: tx.public.txId });
+  });
+});
 
-function broadcastEvent(addr: string, kind: string) {
-  const room = rooms.get(addr);
-  if (!room) return;
-  broadcast(room, null, { type: "event", addr, kind });
-}
+route("POST", "/api/prove-random-fraud", async (req) => {
+  const body = (await req.json()) as {
+    gameId: string; side: "x" | "o";
+    turn: number; slot: number;
+    bitsA: number[]; randomA: string; pathA: WirePath;
+    bitsB: number[]; randomB: string; pathB: WirePath;
+  };
+  return withLock("__wallet__", async () => {
+    log("prove-random-fraud ->", body.gameId.slice(0, 12), "side=", body.side);
+    const fn = body.side === "x" ? "proveRandomEquivocationByX" : "proveRandomEquivocationByO";
+    const tx = await (arena.found as any).callTx[fn](
+      gid(body.gameId),
+      BigInt(body.turn),
+      BigInt(body.slot),
+      ...bits4(body.bitsA), fromHex(body.randomA), decodePath(body.pathA),
+      ...bits4(body.bitsB), fromHex(body.randomB), decodePath(body.pathB),
+    );
+    log("prove-random-fraud: tx", tx.public.txId);
+    broadcastEvent(body.gameId, "fraud-proved");
+    return json({ ok: true, txId: tx.public.txId });
+  });
+});
 
-// ── Server. ────────────────────────────────────────────────────────────────
+route("POST", "/api/prove-wrong-parity", async (req) => {
+  const body = (await req.json()) as {
+    gameId: string;
+    turn: number; slot: number;
+    bitsI: number[]; secretI: string; pathI: WirePath;
+    bitsR: number[]; randomR: string; pathR: WirePath;
+  };
+  return withLock("__wallet__", async () => {
+    log("prove-wrong-parity ->", body.gameId.slice(0, 12), "turn=", body.turn);
+    const tx = await (arena.found as any).callTx.proveWrongParity(
+      gid(body.gameId),
+      BigInt(body.turn),
+      BigInt(body.slot),
+      ...bits4(body.bitsI), fromHex(body.secretI), decodePath(body.pathI),
+      ...bits4(body.bitsR), fromHex(body.randomR), decodePath(body.pathR),
+    );
+    log("prove-wrong-parity: tx", tx.public.txId);
+    broadcastEvent(body.gameId, "fraud-proved");
+    return json({ ok: true, txId: tx.public.txId });
+  });
+});
+
+// ── Server (HTTP + WS). ─────────────────────────────────────────────────────
 
 const server = Bun.serve({
   port: PORT,
@@ -344,27 +464,26 @@ const server = Bun.serve({
           if (typeof msg.addr !== "string" || (msg.role !== "x" && msg.role !== "o")) return;
           const room = getRoom(msg.addr);
           if (room.clients.has(msg.role)) {
-            // Replace any existing socket (handles reload).
             try { room.clients.get(msg.role)!.ws.close(); } catch {}
           }
           room.clients.set(msg.role, { ws, role: msg.role });
           (ws as any).data = { addr: msg.addr, role: msg.role };
           log("ws join", msg.addr.slice(0, 10), msg.role, `(room size=${room.clients.size})`);
-          // Replay any moves to the late joiner.
           for (const m of room.history) {
             try { ws.send(JSON.stringify(m)); } catch {}
           }
-          // Tell the other peer somebody joined.
           broadcast(room, msg.role, { type: "joined", addr: msg.addr, role: msg.role });
           break;
         }
+        case "intent":
+        case "random":
         case "move": {
           const { addr, role } = (ws as any).data;
           if (!addr || !role) return;
           const room = getRoom(addr);
-          room.history.push({ type: "move", payload: msg.payload });
-          log("ws move", addr.slice(0, 10), "turn=", msg.payload?.turn, "from=", role);
-          broadcast(room, role, { type: "move", addr, payload: msg.payload });
+          room.history.push({ type: msg.type, payload: msg.payload });
+          log(`ws ${msg.type}`, addr.slice(0, 10), "turn=", msg.payload?.turn, "from=", role);
+          broadcast(room, role, { type: msg.type, addr, payload: msg.payload });
           break;
         }
         case "event": {
@@ -374,10 +493,8 @@ const server = Bun.serve({
           broadcast(room, null, { type: "event", addr, kind: msg.kind });
           break;
         }
-        case "leave": {
-          // Handled on close.
+        case "leave":
           break;
-        }
       }
     },
     close(ws) {
@@ -396,12 +513,10 @@ const server = Bun.serve({
   async fetch(req: Request) {
     const url = new URL(req.url);
     if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders() });
-    // WS upgrade.
     if (url.pathname === "/relay") {
       const ok = (server as any).upgrade(req);
       return ok ? undefined : new Response("ws upgrade failed", { status: 500 });
     }
-    // HTTP routes.
     for (const r of routes) {
       if (r.method !== req.method) continue;
       const m = url.pathname.match(r.pattern);
@@ -415,7 +530,9 @@ const server = Bun.serve({
         return fail(e instanceof Error ? e.message : String(e), 500);
       }
     }
-    if (url.pathname === "/" || url.pathname === "/api/health") return json({ ok: true });
+    if (url.pathname === "/" || url.pathname === "/api/health") {
+      return json({ ok: true, arena: arena.contractAddress });
+    }
     return fail("not found", 404);
   },
 });

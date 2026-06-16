@@ -1,211 +1,259 @@
 import { useEffect, useState } from "react";
-import { api } from "../api/http.ts";
+import { api, type ContractState } from "../chain/arena.ts";
 import { generatePlayerKeys, PlayerSession } from "../game/player-session.ts";
-import { listSessions, loadSession, saveSession } from "../game/storage.ts";
+import { dropSession, listSessions, loadSession, saveSession, markVsAi, clearVsAi, type IndexEntry } from "../game/storage.ts";
+import { logEvent } from "../game/log-store.ts";
+import { colorOfRole } from "../game/labels.ts";
+import { submitCreateGame, submitJoin } from "../wallet/submit.ts";
+import Board3D from "./Board3D.tsx";
+import { emptyBoard, fullReserves } from "../../../src/sdk/game/rules.ts";
+import { randomGameId } from "../../../src/sdk/crypto/persistent-hash.ts";
 
 export interface HomeProps {
   onOpen: (session: PlayerSession) => void;
 }
 
+type Role = "x" | "o";
 const hex = (b: Uint8Array) => Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("");
 
-type Role = "x" | "o";
-interface IndexEntry { addr: string; role: Role }
+// Let the browser paint the loading overlay before the synchronous Merkle-tree
+// build freezes the main thread. A setTimeout macrotask (not requestAnimationFrame)
+// so it still resolves in a backgrounded/headless tab, where rAF is paused.
+const yieldPaint = () => new Promise<void>((r) => setTimeout(r, 40));
+
+const timeAgo = (ms?: number) => {
+  if (!ms) return "—";
+  const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60); if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60); if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+};
+
+const stateSummary = (s: ContractState): string =>
+  s.status === 0 ? "waiting for opponent"
+  : s.status === 1 ? `in progress · ${s.committedTurns} turn(s)`
+  : `settled · winner ${s.winnerName === "draw" ? "draw" : colorOfRole(s.winnerName as "x" | "o")}`;
+
+type View = "menu" | "join" | "reconnect";
+
+// Underlined glossary term with a hover tooltip.
+function Term({ word, tip }: { word: string; tip: string }) {
+  return <span className="term">{word}<span className="tip">{tip}</span></span>;
+}
 
 export default function Home({ onOpen }: HomeProps) {
+  const [view, setView] = useState<View>("menu");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [joinAddr, setJoinAddr] = useState("");
+  const [joinId, setJoinId] = useState("");
+  const [reconId, setReconId] = useState("");
+  const [reconRole, setReconRole] = useState<Role>("o");
   const [saved, setSaved] = useState<IndexEntry[]>([]);
-  const [importJson, setImportJson] = useState("");
+  const [states, setStates] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    setSaved(listSessions());
+    const list = listSessions();
+    setSaved(list);
+    api.health()
+      .then((h) => logEvent(`relay healthy${h.arena ? ` — arena ${h.arena.slice(0, 12)}…` : ""}`))
+      .catch((e) => logEvent(`! relay unreachable: ${(e as Error).message}`));
+    // Fetch each saved game's on-chain state for the Reconnect list.
+    const seen = new Set<string>();
+    for (const e of list) {
+      if (seen.has(e.addr)) continue;
+      seen.add(e.addr);
+      api.state(e.addr)
+        .then((s) => setStates((m) => ({ ...m, [e.addr]: stateSummary(s) })))
+        .catch(() => setStates((m) => ({ ...m, [e.addr]: "unknown (relay/chain)" })));
+    }
   }, []);
 
-  // Phase 1: X deploys with their own commitments only. Channel is halfOpen
-  // until O calls Join. X persists only THEIR side to localStorage.
-  const openAsX = async () => {
+  // New game: random gameId + keys, then ONE fast createGame call. With
+  // `vsAi`, the game is flagged so GameView spins up a local AI as BLUE/O.
+  const newGame = async (vsAi = false) => {
     setError(null);
-    setBusy("Deploying contract…");
+    setBusy(vsAi ? "Starting AI match — building Merkle trees…" : "Creating game — building Merkle trees…");
+    await yieldPaint();
     try {
-      const x = generatePlayerKeys("x");
-      const res = await api.deploy({
+      const gameId = randomGameId();
+      const gidHex = hex(gameId);
+      logEvent(`create-game: generating keys for ${gidHex.slice(0, 12)}…`);
+      const x = generatePlayerKeys("x", gameId);
+      setBusy("Creating game — submitting transaction…");
+      await yieldPaint();
+      logEvent("create-game: submitting tx…");
+      const res = await submitCreateGame({
+        gameId: gidHex,
         idX: hex(x.id),
         rootX: "0x" + x.tokenTree.root.field.toString(16),
+        rootIdxX: "0x" + x.indexTree.root.field.toString(16),
+        rootRndX: "0x" + x.randomTree.root.field.toString(16),
       });
-      // No opponent info yet — populated when O calls join. Pass null for now.
-      const xSession = new PlayerSession("x", res.contractAddress, x, null);
+      logEvent(`create-game: submitted via ${res.via}${res.txId ? ` (tx ${res.txId.slice(0, 16)}…)` : ""}`);
+      const xSession = new PlayerSession("x", gidHex, x, null);
       saveSession(xSession.serialise());
+      if (vsAi) markVsAi(gidHex);
+      logEvent(vsAi
+        ? `vs-AI game ${gidHex.slice(0, 12)}… created — the AI (BLUE) will join shortly`
+        : `game ${gidHex.slice(0, 12)}… created — share the game id with the BLUE player`);
       onOpen(xSession);
     } catch (e) {
       setError((e as Error).message);
+      logEvent(`! create-game failed: ${(e as Error).message}`);
     } finally {
       setBusy(null);
     }
   };
 
-  // Phase 2: O joins by submitting their own commitments. Then verifies the
-  // on-chain idO/rootO match (catches front-running).
-  const joinAsO = async () => {
+  // Join: O generates their own keys for the pasted gameId.
+  const joinGame = async () => {
     setError(null);
-    if (!joinAddr) { setError("contract address required"); return; }
-    setBusy("Joining channel…");
+    const gidHex = joinId.trim().toLowerCase().replace(/^0x/, "");
+    if (!/^[0-9a-f]{64}$/.test(gidHex)) { setError("game id must be 64 hex chars"); return; }
+    setBusy("Joining — building Merkle trees…");
+    await yieldPaint();
     try {
-      const o = generatePlayerKeys("o");
-      const addr = joinAddr.trim();
+      const gameId = Uint8Array.from(gidHex.match(/.{2}/g)!.map((b) => parseInt(b, 16)));
+      logEvent(`join: generating keys for ${gidHex.slice(0, 12)}…`);
+      const o = generatePlayerKeys("o", gameId);
       const myIdHex = hex(o.id);
-      const myRootHex = "0x" + o.tokenTree.root.field.toString(16);
-
+      // Persist O's keys BEFORE the join tx — recoverable via Reconnect if the
+      // request hangs or the tab reloads (dropped again on a front-run abort).
+      saveSession(new PlayerSession("o", gidHex, o, null).serialise());
+      setBusy("Joining — submitting transaction…");
+      await yieldPaint();
       try {
-        await api.join({ addr, idO: myIdHex, rootO: myRootHex });
+        logEvent("join: submitting tx…");
+        const r = await submitJoin({
+          gameId: gidHex,
+          idO: myIdHex,
+          rootO: "0x" + o.tokenTree.root.field.toString(16),
+          rootIdxO: "0x" + o.indexTree.root.field.toString(16),
+          rootRndO: "0x" + o.randomTree.root.field.toString(16),
+        });
+        logEvent(`join: submitted via ${r.via}${r.txId ? ` (tx ${r.txId.slice(0, 16)}…)` : ""}`);
       } catch (e) {
-        // If join fails because someone already joined, check whether THEIR
-        // creds match ours (then the join was effectively idempotent) or are
-        // different (front-running detected).
-        const state = await api.state(addr);
-        if (state.status === 0) {
-          throw new Error(`join failed: ${(e as Error).message}`);
-        }
-        const chainIdHex = (state as any).idO ?? "";
-        if (chainIdHex.toLowerCase() === myIdHex.toLowerCase()) {
-          // Effectively idempotent.
+        // Already joined? Idempotent if the chain holds OUR credentials.
+        const state = await api.state(gidHex);
+        if (state.status === 0) throw new Error(`join failed: ${(e as Error).message}`);
+        if (state.idO.toLowerCase() === myIdHex.toLowerCase()) {
+          logEvent("join: already on-chain with our credentials (idempotent)");
         } else {
-          throw new Error("⚠️ contract already joined with DIFFERENT credentials — possible front-run. Walk away.");
+          dropSession(gidHex, "o");
+          throw new Error("⚠️ game already joined with DIFFERENT credentials — possible front-run. Walk away.");
         }
       }
-
-      // Sanity-verify the on-chain state matches what we just submitted.
-      const state = await api.state(addr);
-      // (Relay's state endpoint doesn't return idO/rootO directly today; we
-      // just check status flipped to inProgress.)
-      if (state.status !== 1) {
-        throw new Error(`expected status=inProgress after join; got status=${state.status}`);
-      }
-
-      // We don't know X's id/root from on-chain (the state endpoint omits
-      // them in this revision) — but the contract enforces that revealed
-      // X-tokens must verify under the on-chain rootX, so a bogus X player
-      // can't make a move anyway. For dispute-grade verification, the X
-      // commitments could be fetched via queryContractState.
-      const oSession = new PlayerSession("o", addr, o, null);
-      saveSession(oSession.serialise());
-      onOpen(oSession);
+      onOpen(new PlayerSession("o", gidHex, o, null));
     } catch (e) {
       setError((e as Error).message);
+      logEvent(`! join failed: ${(e as Error).message}`);
     } finally {
       setBusy(null);
     }
   };
 
-  const restoreAs = (addr: string, role: Role) => {
+  const removeSession = (addr: string, role: Role) => {
+    dropSession(addr, role);
+    clearVsAi(addr);
+    setSaved(listSessions());
+    logEvent(`removed ${colorOfRole(role)} session for ${addr.slice(0, 12)}… from this browser`);
+  };
+
+  const reconnect = (gameId: string, role: Role) => {
     setError(null);
-    const stored = loadSession(addr.trim(), role);
-    if (!stored) {
-      setError(`No saved ${role.toUpperCase()} session for this address.`);
-      return;
-    }
+    const stored = loadSession(gameId.trim().toLowerCase().replace(/^0x/, ""), role);
+    if (!stored) { setError(`No saved ${colorOfRole(role)} session for that game id in this browser.`); return; }
+    logEvent(`reconnected ${colorOfRole(role)} session for ${gameId.slice(0, 12)}…`);
     onOpen(PlayerSession.restore(stored));
   };
 
-  const importPasted = () => {
-    setError(null);
-    if (!importJson.trim()) { setError("paste the session JSON first"); return; }
-    try {
-      const parsed = JSON.parse(importJson);
-      if (!parsed || typeof parsed !== "object" || !parsed.contractAddress || !parsed.role) {
-        throw new Error("not a SerializedSession (missing contractAddress / role)");
-      }
-      const session = PlayerSession.restore(parsed);
-      saveSession(session.serialise());
-      onOpen(session);
-    } catch (e) {
-      setError(`import failed: ${(e as Error).message}`);
-    }
-  };
-
   return (
-    <div className="layout">
-      <h1>Tic-Tac-Toe state channel</h1>
-      <p className="subtitle">Two-phase open: X deploys, O joins, then play.</p>
-
-      <div className="card">
-        <h3 style={{ margin: "0 0 12px" }}>Phase 1 · Open a new channel (X)</h3>
-        <p style={{ color: "var(--fg-1)", margin: "0 0 12px", fontSize: 13 }}>
-          X generates their own keys + token tree and deploys the contract
-          with ONLY X's commitments. The channel starts in <code>halfOpen</code>
-          state — no settle, no fraud proof — until O joins from their own browser.
-        </p>
-        <div className="row">
-          <button className="primary" onClick={openAsX} disabled={busy !== null}>
-            {busy ?? "Open new channel (X)"}
-          </button>
-        </div>
+    <div className="stage-root">
+      <div className="board-stage">
+        <Board3D board={emptyBoard()} reserves={fullReserves()} myMark={1} mode="view" active={false} spectator />
       </div>
 
-      <div className="card">
-        <h3 style={{ margin: "0 0 12px" }}>Phase 2 · Join an existing channel (O)</h3>
-        <p style={{ color: "var(--fg-1)", margin: "0 0 12px", fontSize: 13 }}>
-          O pastes the contract address X shared, generates O's own keys, and
-          submits <code>joinChannel(idO, rootO)</code>. If the channel was
-          tampered with (front-run), the join fails — you walk away with nothing
-          lost.
-        </p>
-        <div className="col">
-          <input
-            type="text"
-            value={joinAddr}
-            onChange={(e) => setJoinAddr(e.target.value)}
-            placeholder="contract address (hex)"
-          />
-          <div className="row">
-            <button className="primary" onClick={joinAsO} disabled={!joinAddr || busy !== null}>
-              {busy ? busy : "Join as O"}
-            </button>
-            <button onClick={() => restoreAs(joinAddr, "x")} disabled={!joinAddr}>Restore as X</button>
-            <button onClick={() => restoreAs(joinAddr, "o")} disabled={!joinAddr}>Restore as O</button>
-          </div>
-        </div>
-      </div>
+      <div className="landing">
+        <div className="landing-card glass">
+          <p className="brand"><span className="x">STACKED</span> 4×4 · MIDNIGHT</p>
+          <h1 className="title">On-chain Gobblet</h1>
+          <p className="muted">
+            A{" "}
+            <Term word="trustless" tip="No referee or central server to trust — the rules are enforced on-chain by the contract and cryptographic proofs, so neither player can cheat or be cheated." />{" "}
+            game implemented in{" "}
+            <Term word="Midnight" tip="A privacy-focused blockchain that runs smart contracts with zero-knowledge proofs — keeping data confidential while still publicly verifiable." />{" "}
+            with{" "}
+            <Term word="ZK Proofs" tip="Zero-knowledge proofs: cryptography that proves a statement is true (e.g. “this move is legal”) without revealing the secret behind it." />.
+            <br />
+            Place 3 pieces in a row and you win.
+          </p>
 
-      {saved.length > 0 && (
-        <div className="card">
-          <h3 style={{ margin: "0 0 12px" }}>Saved sessions</h3>
-          <div className="col">
-            {saved.map((e) => (
-              <div key={e.addr + e.role} className="spread">
-                <code style={{ fontSize: 12 }}>
-                  {e.addr.slice(0, 16)}…{e.addr.slice(-8)} · {e.role.toUpperCase()}
-                </code>
-                <button onClick={() => restoreAs(e.addr, e.role)}>Restore</button>
+          {view === "menu" && (
+            <div className="choices">
+              <button className="btn-x" onClick={() => newGame(false)}>New game</button>
+              <button className="btn-o" onClick={() => { setError(null); setView("join"); }}>Join a game</button>
+              <button className="btn-glass" onClick={() => newGame(true)}>🤖 Practice vs AI</button>
+              <button className="btn-glass" onClick={() => { setError(null); setView("reconnect"); }}>Reconnect</button>
+            </div>
+          )}
+
+          {view === "join" && (
+            <div className="col" style={{ marginTop: 8 }}>
+              <button className="back-link" onClick={() => setView("menu")}>← back</button>
+              <p className="muted" style={{ margin: 0 }}>
+                Paste the game id X shared. You generate your own keys and submit them — a tampered game
+                fails the join and costs you nothing.
+              </p>
+              <div className="field">
+                <input type="text" value={joinId} onChange={(e) => setJoinId(e.target.value)} placeholder="game id (64 hex chars)" />
+                <button className="btn-o" onClick={joinGame} disabled={!joinId.trim()}>Join</button>
               </div>
-            ))}
+            </div>
+          )}
+
+          {view === "reconnect" && (
+            <div className="col" style={{ marginTop: 8 }}>
+              <button className="back-link" onClick={() => setView("menu")}>← back</button>
+              {saved.length === 0 && <p className="muted" style={{ margin: 0 }}>No saved sessions in this browser yet.</p>}
+              <div className="session-list">
+                {saved.map((e) => (
+                  <div key={e.addr + e.role} className="session">
+                    <span className={`role-chip ${e.role}`}>{colorOfRole(e.role)}</span>
+                    <div className="meta">
+                      <code>{e.addr.slice(0, 14)}…{e.addr.slice(-6)}</code>
+                      <div className="sub">{timeAgo(e.updatedAt)} · {states[e.addr] ?? "checking…"}</div>
+                    </div>
+                    <button className="btn-glass btn-sm" onClick={() => reconnect(e.addr, e.role)}>Resume</button>
+                    <button className="btn-glass btn-sm session-del" title="Remove from this browser" onClick={() => removeSession(e.addr, e.role)}>✕</button>
+                  </div>
+                ))}
+              </div>
+              <p className="muted" style={{ margin: "8px 0 0" }}>…or reconnect by id:</p>
+              <div className="field">
+                <input type="text" value={reconId} onChange={(e) => setReconId(e.target.value)} placeholder="game id (64 hex chars)" />
+                <div className="seg">
+                  <button className={reconRole === "x" ? "active x" : ""} onClick={() => setReconRole("x")}>RED</button>
+                  <button className={reconRole === "o" ? "active o" : ""} onClick={() => setReconRole("o")}>BLUE</button>
+                </div>
+                <button className="btn-glass" onClick={() => reconnect(reconId, reconRole)} disabled={!reconId.trim()}>Resume</button>
+              </div>
+            </div>
+          )}
+
+          {error && <div className="error">{error}</div>}
+        </div>
+      </div>
+
+      {busy && (
+        <div className="loading-overlay">
+          <div className="loading-card glass">
+            <div className="spinner" />
+            <div>{busy}</div>
+            <div className="muted" style={{ fontSize: 12 }}>This can take a few seconds.</div>
           </div>
         </div>
       )}
-
-      <div className="card">
-        <h3 style={{ margin: "0 0 12px" }}>Import session from JSON</h3>
-        <p style={{ color: "var(--fg-1)", margin: "0 0 10px", fontSize: 13 }}>
-          For migrating a saved session between browsers. Paste a serialized
-          PlayerSession JSON to import + play.
-        </p>
-        <div className="col">
-          <textarea
-            value={importJson}
-            onChange={(e) => setImportJson(e.target.value)}
-            placeholder='{ "role": "o", "contractAddress": "...", ... }'
-            rows={4}
-          />
-          <div className="row">
-            <button className="primary" onClick={importPasted} disabled={!importJson.trim()}>
-              Import &amp; play
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {error && <div className="error">{error}</div>}
     </div>
   );
 }
