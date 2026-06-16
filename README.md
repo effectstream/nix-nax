@@ -1,202 +1,202 @@
-# Tic-Tac-Toe state channel on Midnight
+# Nix-Nax
 
-A two-player tic-tac-toe game that plays **off-chain at memory speed** and
-settles **on-chain in one transaction**, with cryptographic anti-cheat —
-equivocation is provable, silence is timed out. Implements the design from
-`midnight-ref-ai/experiments/tic-tac-toe-channel/IMPLEMENTATION_SPEC.md`.
+A trustless, two-player **4×4 stacked-pieces game** on the [Midnight](https://midnight.network) blockchain, settled with **zero-knowledge proofs**. Moves are played **off-chain at memory speed** and only the result is committed on-chain — cheating is cryptographically provable, and the winner mints a shielded reward token.
 
-## What's in the box
+> Source: **[github.com/effectstream/nix-nax](https://github.com/effectstream/nix-nax)**
 
-```
-src/contract/TicTacToeChannel.compact   Merged Compact contract — 6 circuits.
-src/contract/witnesses.ts                localSecret witness for caller auth.
-src/sdk/                                 Bun + TypeScript SDK.
-  crypto/                                  persistentHash + token-tree + SignedMove.
-  game/                                    GameSession (build moves, settle, dispute).
-  env, wallet, providers, deploy           Vendored, trimmed midnight-js wiring.
-src/cli/ttt.ts                           Tiny manual CLI (open, show, decode-move).
-scripts/{stack-up,stack-down}.ts          Start/stop local node + indexer + proof-server.
-test/                                    14 contract sim tests + 15 crypto tests + 3 e2e.
-relay/server.ts                          Bun HTTP+WS service: chain API + move relay.
-webapp/                                  Vite + React SPA — clickable game board.
-```
+It's a state channel: two players run the whole game peer-to-peer, then post a short, proof-backed summary to the chain. Nobody has to trust a server or each other — the contract and the proofs enforce the rules.
 
-## Compact contract — six circuits
+---
 
-1. **constructor** — registers `idX`, `idO` (identity commitments) and
-   `rootX`, `rootO` (one-time-token Merkle roots).
-2. **`settle(nMoves, cells, secrets, paths, untilTime)`** — replays an
-   off-chain move log on-chain. Verifies each new move's one-time token under
-   the mover's root, places the mark, detects win/draw, and arms a challenge
-   window. A longer valid history may override within the window.
-3. **`claimResult()`** — finalises after the challenge window elapses.
-4. **`startTimeout(untilTime)`** — the waiting player (proving their secret)
-   arms a deadline.
-5. **`claimTimeout()`** — permissionless; once the deadline passes, the
-   player-to-move forfeits.
-6. **`proveEquivocationByX(turn, cellA, secretA, pathA, cellB, secretB, pathB)`** —
-   two valid X-tokens for the same turn at different cells. **O wins
-   instantly**, channel settles, no challenge window.
-7. **`proveEquivocationByO(...)`** — symmetric.
+## The game
 
-**Authentication.** No circuit uses `ownPublicKey()` (a spoofable witness —
-OZ audit C-01). Instead, callers prove knowledge of `skP` via
-`persistentHash("ttt:id:", skP) == idP` (the bboard pattern). For the
-permissionless circuits (`settle`, `proveEquivocation*`, `claimTimeout`,
-`claimResult`), the payload (one-time tokens) and on-chain state are the
-authenticator — they need no caller check.
+A Gobblet-style game on a **4×4 board**. Each player has **12 pieces** — 3 each of 4 sizes (0 = smallest … 3 = largest). A larger piece **covers** (gobbles) a smaller one on the same cell; the visible top piece is what counts. **Four in a row** (any row, column, or diagonal) wins.
 
-**One-time tokens (see `src/sdk/crypto/token-tree.ts`).** Each player generates
-81 secrets indexed by `(turn, cell)`. Each leaf = `persistentHash(domainSep,
-turn, cell, secret)`. The depth-10 Merkle root is registered on-chain at open.
-Authorising the move at `(turn k, cell c)` reveals `s[k][c]` and its path —
-verified in-circuit by `tokenIsUnder`. Equivocating means revealing two
-tokens for the same turn → trivially provable fraud.
+Every turn opens with a **joint dice roll** (0–15) that decides the move type:
 
-## Prerequisites
+- roll **< 3** (~19%) → **remove** a piece (yours *or* your opponent's) from the board,
+- otherwise (~81%) → **place** a piece.
 
-- macOS or Linux (ARM64 or x86_64).
-- [Bun](https://bun.sh/) — `bun install` and the test runner.
-- The [Compact toolchain](https://github.com/midnightntwrk/compact) — `compact
-  --version` must work. Then `compact update 0.30.0` to pin the language
-  version this project uses.
+Neither player controls the roll — it is the XOR of secret bits both sides committed before the game began (see [Randomness](#randomness-the-joint-roll)). The rules live in [`src/sdk/game/rules.ts`](src/sdk/game/rules.ts) and are mirrored exactly in-circuit.
 
-## One-time setup
+---
+
+## Quickstart
+
+### Prerequisites
+
+- **macOS or Linux** (ARM64 or x86_64)
+- **[Bun](https://bun.sh/)** — package manager + script runner
+- **Node.js** — runtime for the TypeScript SDK
+- **[Compact toolchain](https://docs.midnight.network)** — `compact --version` must work; this project pins **`+0.30.0`** (the build invokes `compact compile +0.30.0`)
+- The local Midnight stack (node, indexer, proof server) is downloaded and run for you by the `@effectstream/npm-midnight-*` dev dependencies.
+
+### Run it locally
 
 ```bash
+# 1. Install root dependencies
 bun install
-bun run compact          # compile .compact -> src/contract/managed/
-```
 
-`bun run compact:check` runs the WASM-only syntactic compile (faster, no
-artifacts).
+# 2. Compile the Compact contract  ->  src/contract/managed/
+bun run compact
 
-## Run the tests
-
-### Unit (contract simulation + crypto) — no chain required
-
-```bash
-bun run test
-```
-
-14 contract-simulation tests drive the compiled circuits in pure JS through
-`@midnight-ntwrk/compact-runtime` — open, settle (happy path / override /
-draw), claimResult, equivocation, timeout, negatives. 15 crypto tests cover
-token-tree parity, SignedMove verification, equivocation builder, JSON serde.
-
-### End-to-end (real local stack)
-
-Bring up the local Midnight stack (node 9944, indexer 8088, proof server 6300):
-
-```bash
-bun run stack:up
-```
-
-Logs land in `.stack-logs/`. When you see `wait-on` exit cleanly:
-
-```bash
-bun run test:e2e
-```
-
-Three e2e tests, total ~5 minutes:
-- **happy** — deploy, play a 5-move X win off-chain, settle, claimResult.
-- **fraud** — X equivocates, O calls `proveEquivocationByX`, O wins instantly.
-- **timeout** — X plays one move, O is silent, X arms `startTimeout`, claims
-  forfeit after the deadline.
-
-Stop the stack:
-
-```bash
-bun run stack:down
-```
-
-## Manual play
-
-```bash
-bun run cli open          # deploy a fresh channel; prints contract address
-bun run cli show          # query on-chain state
-```
-
-The CLI is intentionally minimal — full game flow is exercised by the e2e
-tests, which thread two `GameSession` instances through the protocol.
-
-## Web frontend (`webapp/` + `relay/`)
-
-A Vite + React UI lives in `webapp/`; a tiny Bun service in `relay/` exposes
-the on-chain SDK over HTTP and forwards `SignedMove`s over WebSocket. To
-play in a browser:
-
-```bash
-# 1. Local Midnight stack (node + indexer + proof server)
+# 3. Start the local Midnight stack and wait for "Stack is up."
+#    node :9944   indexer :8088   proof server :6300   (logs in .stack-logs/)
 bun run stack:up
 
-# 2. Relay / chain backend on port 4310 (boots once; reuses one wallet).
-#    This blocks until the wallet syncs (~30-60s on a fresh chain).
+# 4. Deploy the arena contract  ->  writes webapp/public/arena.json
+bun run deploy
+
+# 5. Start the message relay on :4310 (a dumb WebSocket switchboard for moves).
+#    Required for ALL play — even Practice-vs-AI marshals moves through it.
 bun --cwd relay install
 bun --cwd relay run start
 
-# 3. Vite dev server on port 5173 (in another terminal)
+# 6. Start the web client on :5173 (in another terminal)
 bun --cwd webapp install
 bun --cwd webapp run dev
 ```
 
-Open two browser tabs at `http://localhost:5173`. Tab A clicks *Open new
-game (X)* — the deploy takes ~20 s and switches into the game board. Tab A
-copies the contract address (Status panel → *copy*); Tab B pastes it into
-*Join an existing game* and clicks *Restore as O*. The two tabs now share
-the channel: clicks on the board send `SignedMove`s through the relay in
-both directions in <100 ms. The Status panel polls `/api/state/:addr` every
-3 s and shows live on-chain progress.
+Open **http://localhost:5173**, click the **Wallet** button (top-right) and use the **faucet** to fund an in-browser session wallet, then hit **New game**, **Join a game**, or **Practice vs AI**.
 
-Action buttons appear contextually:
-- *Settle on-chain* — enabled once your local log has more moves than
-  `committedTurns`.
-- *Claim result* — enabled once `challengeUntil` has elapsed.
-- *Start timeout* / *Claim timeout* — for when the opponent goes silent.
-- *Prove fraud* — lights up automatically if the opponent has sent two
-  `SignedMove`s for the same turn (auto-detected via `detectEquivocation`).
+For a two-human game, both browsers point at the same relay + the same `arena.json`; one player creates a game and shares the **game id**, the other joins with it. Tear everything down with `bun run stack:down`.
 
-The browser never holds the Midnight wallet — only the player's identity
-secret and token-tree, both of which stay in `localStorage`. Every on-chain
-call is a single POST to the relay.
+> **Serverless by design.** There is no backend that holds keys or submits transactions. The **browser** builds, proves, and submits every on-chain call through an in-browser Midnight wallet, and pays its own gas. The relay only shuttles off-chain messages between the two players.
 
-> **Local-dev only.** The relay uses the genesis-funded seed
-> (`0x0…01`); `localStorage` stores the player's `skP` unencrypted. Both
-> are fine for a local demo, neither is safe for testnet or production.
+---
 
-## Key implementation details
+## How it works
 
-- **Block-time units.** Substrate's Timestamp pallet is in seconds since
-  epoch. `GameSession.settle` / `startTimeout` convert from `Date.now()` ms
-  to seconds before calling the circuit.
-- **Settle override invariant.** `settle` does NOT clear the board between
-  calls — the loop body skips indices below `committedTurns` (those are
-  already placed on chain). An override must therefore use *real* tokens at
-  the right `(turn, cell)` indices, which only the actual player could have
-  revealed. The natural `!board.member(c)` check on new indices catches any
-  contradicting placement.
-- **Indexer lag.** Between two sequential txs, the off-chain indexer needs
-  to ingest the first tx before the second's call can be built against fresh
-  state. The timeout test sleeps 20 s between `settle` and `startTimeout`.
-- **`localSecret` witness.** Returned to the circuit from the player's
-  private state (stored in the level DB). Each `GameSession` attaches with a
-  distinct `privateStateStoreName` so X and O don't share secret storage.
+### A state channel, not a per-turn ledger
 
-## Out of scope (deliberate)
+Posting every move to a blockchain is slow and expensive: each move would be its own transaction, each needing a ZK proof and a block to land in. Nix-Nax avoids that almost entirely.
 
-- Escrow / unshielded-token deposits / payout slashing (M3 in the spec).
-  The contract is structured so escrow can be bolted on without re-architecting:
-  add a `deposit` circuit, two boolean ledger flags, and a `claimPayout` that
-  reads `winner` and uses the std-lib `sendUnshielded`.
-- Web dApp UI (M4).
-- Real multi-wallet e2e — the tests use one wallet for both players. The
-  cryptographic separation (identity commitments, token roots, witness
-  secrets) is what isolates the two players, not the on-chain submitter.
+```mermaid
+flowchart LR
+  A["Lobby<br/>New game / Join / vs AI"] --> B["createGame / joinGame<br/>(on-chain: commit identities + Merkle roots)"]
+  B --> C["Off-chain ceremony via relay<br/>intent → random → signed move"]
+  C -- "repeat each turn (instant, free)" --> C
+  C --> D["settle (on-chain)<br/>up to 8 moves/tx + Merkle proofs"]
+  D --> E["Challenge window<br/>fraud proofs can slash a cheater"]
+  E --> F["claimResult (on-chain)<br/>finalize + mint win-token to winner"]
+```
 
-## References
+Only a handful of call types ever touch the chain — `createGame` / `joinGame` to open a game, `settle`, `claimResult`, the `startTimeout` / `claimTimeout` forfeit path, and the fraud proofs. Everything else happens peer-to-peer over the relay ([`relay/server.ts`](relay/server.ts), [`src/sdk/crypto/signed-move.ts`](src/sdk/crypto/signed-move.ts)): the mover sends an **intent**, the opponent replies with a **random reveal**, and the mover broadcasts a **signed move** that hash-chains to the previous one. Each side verifies locally before accepting.
 
-- `IMPLEMENTATION_SPEC.md` (in `midnight-ref-ai/experiments/tic-tac-toe-channel/`).
-- `midnight-ref-ai/compact/wasm/dist/standard-library.compact` — `merkleTreePathRoot`,
-  `persistentHash`, `tokenType`, unshielded coin ops.
-- `pe-bun-3/e2e/shared/contracts/midnight/contract-counter/` — the working
-  pattern this project mirrors for compile/deploy/test wiring.
+### The three Merkle trees
+
+When a game opens, each player commits **three Merkle roots** on-chain (six roots total). They never reveal the trees — only a leaf + its path, when needed, and the contract checks it against the root. Every leaf binds the **`gameId`**, so nothing can be replayed into another game. A player's per-game identity is `playerId = persistentHash("gob:id:", gameId, localSecret)` ([`src/contract/witnesses.ts`](src/contract/witnesses.ts)), proven via the `localSecret` witness — no spoofable `ownPublicKey()`.
+
+| Tree | Depth / leaves | One leaf per… | Commits | Source |
+|------|----------------|---------------|---------|--------|
+| **Token (T)** | 14 / 16,384 | legal action `(turn, kind, cell, size)` — 81/turn | a salted **one-time token** authorizing that exact action | [`token-tree.ts`](src/sdk/crypto/token-tree.ts) |
+| **Index (I)** | 7 / 128 | turn | the mover's chosen **slot** + their **4 roll bits** | [`index-tree.ts`](src/sdk/crypto/index-tree.ts) |
+| **Random (R)** | 11 / 2,048 | `(turn, slot)` — 128 × 16 | the responder's **randomness** + their **4 roll bits** | [`random-tree.ts`](src/sdk/crypto/random-tree.ts) |
+
+The **Token tree** is what makes cheating provable: there is exactly one token per `(turn, kind, cell, size)`. To play a move you reveal its token + path; the contract verifies it under your root. Reveal *two different* actions for the same turn and you've published two valid tokens for one turn — that's **equivocation**, and it's instantly punishable (below).
+
+### Randomness — the joint roll
+
+Each turn's roll is built from **both** players' pre-committed bits, so neither can bias it:
+
+```
+roll = Σ ( bit_k(mover) XOR bit_k(responder) ) · 2^k     for k in 0..3   →  0..15
+remove  iff  roll < ROLL_REMOVE_THRESHOLD (= 3)          otherwise  place
+```
+
+Because both the Index and Random trees are rooted on-chain *before any turn is played*, the bits are locked in at commit time. During a turn the mover reveals their I-leaf (which picks a `slot`), the responder reveals the R-leaf at `(turn, slot)`, and `roll = XOR` of the two 4-bit values. It's a commit-then-reveal coin flip neither side can steer ([`jointRollValue` / `classOfRoll`](src/sdk/game/rules.ts), mirrored in-circuit).
+
+### Settling on-chain, in chunks
+
+At the end (or whenever a player wants to checkpoint), `settle` replays the agreed move log on-chain, verifying each move's Token-tree proof and detecting the win. It commits **up to 8 moves per transaction**:
+
+```ts
+// src/sdk/game/rules.ts
+export const SETTLE_CHUNK = 8;
+// Settle commits up to this many moves per tx. 8 keeps the settle circuit
+// within the node's per-block weight budget (16 exhausted it at deploy).
+```
+
+`settle` records each move's roll *class* **optimistically** — it does not re-verify the I/R bits in-circuit (that would double the proof size). Instead, correctness is backstopped by a **challenge window** and fraud proofs.
+
+**Why this beats submitting every turn.** A per-turn design pays one proving transaction *per move* — up to ~128 a game, each a ZK proof plus a block. Nix-Nax plays the moves **off-chain (instant, free)** and posts only the moves that matter, **8 per `settle` tx**, ending the moment someone lines up four. So a game costs roughly `⌈moves / 8⌉` settle transactions plus one `claimResult`, instead of one transaction per turn — while the fraud-proof safety net preserves the same guarantees.
+
+### Trust model — fraud proofs & timeouts
+
+During the challenge window after a `settle`, the opponent can slash a cheater with a single proof (the game ends immediately against the cheater):
+
+- **`proveWrongParity`** — the claimed roll class doesn't match the XOR of the committed I/R bits.
+- **`proveEquivocationByX/O`** — two valid Token-tree leaves for the same turn.
+- **`proveIndexEquivocationByX/O`** — two valid Index-tree leaves for the same turn.
+- **`proveRandomEquivocationByX/O`** — two valid Random-tree leaves for the same `(turn, slot)`.
+
+If a player simply goes silent, the other arms `startTimeout` and later `claimTimeout` to claim the forfeit. Once the window closes with no successful challenge, `claimResult` finalizes the outcome. All of this lives in [`src/contract/GobbletArena.compact`](src/contract/GobbletArena.compact).
+
+---
+
+## Win rewards — a shielded win-token
+
+When a decided game's challenge window closes, the **winner** calls `claimResult(gameId, recipient)`, which finalizes the game and **mints exactly one shielded "win token"** to them:
+
+```compact
+mintShieldedToken(pad(32, "nixnax:win"), 1, nonce, left<...>(recipient));
+```
+
+- **Winner-only** for decided games (enforced by `callerMark` via the `localSecret` witness); **draws mint nothing**, and a unique per-game nonce means each game mints at most once.
+- All wins share one token color, so **your balance of it = your number of wins**. The client derives the token type with `rawTokenType(pad32("nixnax:win"), contractAddress)` and reads it from the wallet's shielded balances ([`webapp/src/chain/arena.ts`](webapp/src/chain/arena.ts)).
+- The UI shows **"🏆 Win tokens: N"** in the wallet panel and an "earned a win token" badge on the win overlay ([`WalletButton.tsx`](webapp/src/ui/WalletButton.tsx), [`GameView.tsx`](webapp/src/ui/GameView.tsx)); the loser isn't shown a (failing) Redeem button ([`useChainActions.ts`](webapp/src/ui/useChainActions.ts)).
+
+---
+
+## Project structure
+
+```
+src/contract/      GobbletArena.compact — the on-chain "arena" (hosts many games) + witnesses
+src/sdk/           TypeScript SDK
+  crypto/            persistent hash, the three Merkle trees, signed-move ceremony
+  game/              rules + GameSession (build/verify moves, settle, disputes)
+  wallet, providers  in-browser Midnight wiring (build / prove / submit)
+scripts/           stack-up · stack-down · deploy
+relay/             message-only WebSocket switchboard (server.ts)
+webapp/            Vite + React client — builds, proves, and submits in the browser
+test/              contract.sim + crypto (unit) · e2e/ (live-stack)
+```
+
+---
+
+## Testing
+
+```bash
+bun run test       # unit: contract simulation + crypto — no chain needed (55 tests)
+bun run test:e2e   # end-to-end against the live local stack (happy / fraud / timeout)
+bun run typecheck  # tsc --noEmit
+```
+
+`bun run test` drives the compiled circuits in pure JS via `@midnight-ntwrk/compact-runtime` (open / settle / claimResult-with-mint / equivocation / timeout, plus crypto: Merkle trees, signed-move verification, serde). `bun run test:e2e` deploys to a real local chain and plays full scenarios — it needs `stack:up` running first.
+
+---
+
+## Tech stack
+
+| Layer | What |
+|-------|------|
+| Contract | **Compact 0.30.0** (`GobbletArena.compact`) on **Midnight** |
+| Chain access | **midnight-js** (contracts, providers, indexer) |
+| Wallet | in-browser **WalletFacade** (`@midnight-ntwrk/wallet-sdk-*`, shielded + dust) |
+| Client | **React + Vite + TypeScript** |
+| Relay | **Bun** WebSocket service (message-only) |
+| Tooling | **Bun**, **Vitest**, local Midnight stack via `@effectstream/npm-midnight-*` |
+
+---
+
+## A note on naming
+
+The product is **Nix-Nax**. Internally the contract is **`GobbletArena`** (on-chain identifier **`gobblet-arena`**) because the game is Gobblet-style — that identifier and the `tictactoe-*` package names are load-bearing and intentionally unchanged.
+
+## License
+
+License: TBD.
+
+## Further reading
+
+- [Midnight docs](https://docs.midnight.network) · [Compact language](https://docs.midnight.network/develop/reference/compact).

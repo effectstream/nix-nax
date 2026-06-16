@@ -1,1 +1,0 @@
-From here, the chain goes quiet. Each move goes over a WebSocket — the mover reveals one Merkle-tree leaf, and the opponent verifies it against the root.

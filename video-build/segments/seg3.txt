@@ -1,1 +1,0 @@
-Instead, we move the gameplay off-chain. On the left, player X is deploying the contract. They submit only their own Merkle root — a commitment to all the moves they might ever make. The channel opens in a half-open state.

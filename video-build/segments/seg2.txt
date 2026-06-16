@@ -1,1 +1,0 @@
-Normally, every move would be a separate blockchain transaction. That's about twenty-five seconds each. A nine-move game would take three minutes.
