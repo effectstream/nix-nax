@@ -8,10 +8,13 @@
 // relay/server.ts so the on-chain calls are byte-identical.
 
 import { findDeployedContract } from "@midnight-ntwrk/midnight-js-contracts";
+import { encodeCoinPublicKey, rawTokenType } from "@midnight-ntwrk/compact-runtime";
+import { firstValueFrom } from "rxjs";
 import { createTicTacToePrivateState, ledger } from "../../../src/contract/index.ts";
 import { buildBrowserProviders } from "./providers.ts";
 import { makeCompiled, PRIVATE_STATE_ID } from "./compiled.ts";
 import { getGasWallet } from "../wallet/local-wallet.ts";
+import { logEvent } from "../game/log-store.ts";
 
 // ── Wire types (identical to the old api/http.ts) ───────────────────────────
 export type WirePath = { leaf: string; path: { sibling: string; goes_left: boolean }[] };
@@ -211,6 +214,52 @@ async function readState(gameId: string): Promise<ContractState> {
   };
 }
 
+// ── Win-token (shielded reward) ─────────────────────────────────────────────
+// claimResult mints 1 "nixnax:win" shielded token to the winner's gas wallet.
+// Its color = tokenType(pad(32,"nixnax:win"), contractAddress) on-chain; a
+// wallet's balance of that token = its number of wins. The domain separator
+// must match the contract's pad(32,"nixnax:win") byte-for-byte (string bytes
+// first, zero-filled to 32).
+const WIN_DOMAIN = "nixnax:win";
+const pad32 = (s: string): Uint8Array => {
+  const b = new TextEncoder().encode(s);
+  if (b.length > 32) throw new Error("domain separator > 32 bytes");
+  const out = new Uint8Array(32);
+  out.set(b, 0);
+  return out;
+};
+
+// The win-token's raw type string — the key under wallet.state().shielded.balances.
+export async function winTokenRaw(): Promise<string> {
+  return rawTokenType(pad32(WIN_DOMAIN), await arenaAddress());
+}
+
+// How many win-tokens the active gas wallet holds (= wins). Reads the live
+// wallet state. Robust to the exact balances-key shape: prefers the precisely
+// derived raw key, else falls back to the sole custom (non-native) shielded
+// balance — the win-token is the only shielded token this dApp ever mints.
+export async function readWinBalance(): Promise<number> {
+  try {
+    const bundle = await getGasWallet();
+    const st: any = await firstValueFrom((bundle as any).wallet.state());
+    const balances: Record<string, bigint> = st?.shielded?.balances ?? {};
+    const raw = await winTokenRaw();
+    const keys = Object.keys(balances);
+    let n = balances[raw];
+    if (n == null) {
+      // Fallback: sum non-native shielded balances (native shielded tag = 'shielded').
+      let sum = 0n;
+      for (const [k, v] of Object.entries(balances)) if (k !== "shielded") sum += v ?? 0n;
+      n = sum;
+    }
+    logEvent(`wins: ${n} (raw ${raw.slice(0, 16)}…; shielded keys=[${keys.map((k) => k.slice(0, 10)).join(", ")}])`);
+    return Number(n ?? 0n);
+  } catch (e) {
+    logEvent(`wins: read failed — ${(e as Error).message}`);
+    return 0;
+  }
+}
+
 // ── Public API (mirrors webapp/src/api/http.ts `api`) ───────────────────────
 export const api = {
   health: async (): Promise<{ ok: true; arena?: string }> => ({ ok: true, arena: await arenaAddress() }),
@@ -260,10 +309,16 @@ export const api = {
       return { ok: true as const, txId: txIdOf(tx) };
     }),
 
-  claimResult: (gameId: string) =>
+  claimResult: (gameId: string, secret: string) =>
     withLock(async () => {
-      const { found } = await attach();
-      const tx = await found.callTx.claimResult(gid(gameId));
+      // Attach with the caller's secret — claimResult reads the localSecret witness
+      // (via callerMark) to enforce winner-only finalisation of a decided game — then
+      // mint the win-token to the submitting gas wallet (recipient = its shielded coin
+      // public key). Draws finalise with no mint; the recipient is then unused.
+      const { found } = await attachWithSecret(fromHex(secret));
+      const wallet = await getGasWallet();
+      const recipient = { bytes: encodeCoinPublicKey((wallet as any).zswapSecretKeys.coinPublicKey) };
+      const tx = await found.callTx.claimResult(gid(gameId), recipient);
       return { ok: true as const, txId: txIdOf(tx) };
     }),
 

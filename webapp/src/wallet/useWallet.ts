@@ -9,8 +9,9 @@ import { logEvent } from "../game/log-store.ts";
 // VITE_NETWORK_ID. The wallet must be set to this network to connect.
 export const NETWORK_ID = (import.meta as { env?: Record<string, string> }).env?.VITE_NETWORK_ID ?? "undeployed";
 
-// "wallet" = a connected browser extension pays its own gas; "local" = the dev
-// "Local wallet" where the relay's seed wallet pays (undeployed only).
+// "wallet" = a connected browser-extension wallet pays its own gas; "local" =
+// the "Session Wallet + Auto Faucet" — a per-browser wallet the faucet funds and
+// registers for dust, which then pays gas (undeployed dev only).
 export type WalletMode = "wallet" | "local";
 
 export interface WalletState {
@@ -20,13 +21,21 @@ export interface WalletState {
   address: string | null;
   dust: { cap: bigint; balance: bigint } | null;
   connecting: boolean;
+  modalOpen: boolean; // wallet panel visibility — shared so the lobby can prompt to connect
 }
 
-let state: WalletState = { mode: null, api: null, name: null, address: null, dust: null, connecting: false };
+let state: WalletState = { mode: null, api: null, name: null, address: null, dust: null, connecting: false, modalOpen: false };
 const subs = new Set<() => void>();
 const set = (next: Partial<WalletState>) => { state = { ...state, ...next }; for (const f of subs) f(); };
 
 export const walletApi = (): ConnectedAPI | null => state.api;
+
+// A gas-paying wallet is connected: an injected extension OR the local session wallet.
+export const isConnected = (s: WalletState): boolean => s.mode === "wallet" || s.mode === "local";
+
+// Wallet panel open/close — shared via the store so Home can prompt the user.
+export function openWalletModal(): void { set({ modalOpen: true }); }
+export function closeWalletModal(): void { set({ modalOpen: false }); }
 
 // Connect a specific browser-extension wallet → it pays the player's gas.
 export async function connect(wallet: InitialAPI): Promise<void> {
@@ -46,16 +55,16 @@ export async function connect(wallet: InitialAPI): Promise<void> {
   }
 }
 
-// "Local wallet" (undeployed dev): no extension — the relay's seed wallet pays
-// gas. `api` stays null so the dual-mode Submitter keeps using the relay path.
-export function connectLocal(): void {
-  set({ mode: "local", api: null, name: "Local wallet", address: null, dust: null, connecting: false });
-  logEvent("wallet: using the local wallet — the relay pays gas");
+// "Session Wallet + Auto Faucet" (undeployed dev): the faucet funded a per-browser
+// session wallet (or kept genesis as the dust payer) and made it the gas payer.
+// Reflect it in the shared store so the lobby knows a wallet is ready to play.
+export function connectSessionWallet(address: string): void {
+  set({ mode: "local", api: null, name: "Session Wallet + Auto Faucet", address, connecting: false });
 }
 
 export function disconnect(): void {
   set({ mode: null, api: null, name: null, address: null, dust: null });
-  logEvent("wallet: disconnected — the relay will pay gas");
+  logEvent("wallet: disconnected");
 }
 
 export function useWallet(): WalletState {

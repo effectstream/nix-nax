@@ -3,8 +3,8 @@ import Board3D, { type BoardMode } from "./Board3D.tsx";
 import GameMenu from "./GameMenu.tsx";
 import TurnDie, { type DieTarget } from "./TurnDie.tsx";
 import { useChainActions } from "./useChainActions.ts";
-import { api, type ContractState } from "../chain/arena.ts";
-import { connectRelay, type RelayClient } from "../api/ws.ts";
+import { api, readWinBalance, type ContractState } from "../chain/arena.ts";
+import { connectRelay, localRelay, type RelayClient } from "../api/ws.ts";
 import {
   PlayerSession,
   decodeIntent,
@@ -54,6 +54,8 @@ export default function GameView({ session, onLeave }: Props) {
   const [selectedSize, setSelectedSize] = useState<number>(0);
   const [menuOpen, setMenuOpen] = useState(false);
   const [winDismissed, setWinDismissed] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [wins, setWins] = useState<number | null>(null);
   const [aiMsg, setAiMsg] = useState<string>(() => nextAiThought());
   const [tick, setTick] = useState(0);            // re-render pulse (WS / chain events)
   const force = () => setTick((x) => x + 1);
@@ -86,11 +88,21 @@ export default function GameView({ session, onLeave }: Props) {
   const refreshChain = () => { api.state(session.gameId).then(applyChain).catch(() => {}); };
 
   const actions = useChainActions(session, chain, refreshChain);
+  const vsAi = isVsAi(session.gameId);
+
+  // Win-token balance (your wins) — shown in the game-info panel. Re-read on
+  // mount and whenever the on-chain status changes (e.g. after Redeem mints one).
+  useEffect(() => {
+    void readWinBalance().then(setWins).catch(() => {});
+  }, [chain?.status]);
 
   // ── Relay wiring ──────────────────────────────────────────────────────────
   useEffect(() => {
     log(`session: role=${colorOfRole(session.role)}, game=${session.gameId.slice(0, 16)}…, local turns=${session.committedTurns}`);
-    const client = connectRelay(
+    // Practice vs AI loops through an in-tab channel (no relay server); real
+    // multiplayer uses the WebSocket relay.
+    const connect = vsAi ? localRelay : connectRelay;
+    const client = connect(
       session.gameId,
       session.role,
       (msg) => {
@@ -143,7 +155,6 @@ export default function GameView({ session, onLeave }: Props) {
   }, [session.gameId, session.role]);
 
   // ── Local AI opponent (Practice vs AI) — runs O headless in this same tab ─
-  const vsAi = isVsAi(session.gameId);
   useEffect(() => {
     if (!vsAi) return;
     const ai = startAiOpponent(session.gameId);
@@ -295,7 +306,7 @@ export default function GameView({ session, onLeave }: Props) {
         if (actParity === 0) {
           return mustPass
             ? <>Turn {turnNo} — it's your turn. Nothing to remove — pass.</>
-            : <>Turn {turnNo} — it's your turn. You rolled a <strong>remove</strong> — take one of your opponent's pieces off the board.</>;
+            : <>Turn {turnNo} — it's your turn. You rolled a <strong>remove</strong> — take any piece off the board (yours or your opponent's).</>;
         }
         if (stalledPlace) return <>Turn {turnNo} — it's your turn, but there's no legal placement. You're stalled.</>;
         return <>Turn {turnNo} — it's your turn. Select a {myColor} piece and place it on the board.</>;
@@ -328,7 +339,41 @@ export default function GameView({ session, onLeave }: Props) {
       </div>
 
       <button className="hamburger glass" onClick={() => setMenuOpen(true)} aria-label="Blockchain actions">☰</button>
-      {vsAi && <div className="vsai-chip glass">vs <span className="accent">AI</span></div>}
+      <div className="gi-stack">
+        <div className="win-token-panel glass" tabIndex={0}>
+          <span className="win-token-icon" aria-hidden>🏆</span>
+          <span className="win-token-label">Win tokens</span>
+          <span className="win-token-count">{wins == null ? "…" : wins}</span>
+          <span className="tip">
+            These are <strong>tokens</strong> — shielded rewards minted to you when you win.
+            They can be traded and viewed in your wallet.
+          </span>
+        </div>
+        <div className="game-info glass">
+        <div className="gi-head">
+          <span className="gi-label">GAME ID</span>
+          {vsAi && <span className="vsai-inline">vs <span className="accent">AI</span></span>}
+        </div>
+        <button
+          className="gi-id"
+          title="Copy game id"
+          onClick={() => {
+            navigator.clipboard?.writeText(session.gameId)
+              .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); })
+              .catch(() => {});
+          }}
+        >
+          <span className="mono">{session.gameId.slice(0, 8)}…{session.gameId.slice(-6)}</span>
+          <span className="gi-copy">{copied ? "copied ✓" : "copy"}</span>
+        </button>
+        {!vsAi && !session.opponentInfo && (
+          <p className="gi-invite">
+            Send this id to a friend so they can <strong>Join a game</strong> as{" "}
+            <span className="piece-color o">BLUE</span>.
+          </p>
+        )}
+        </div>
+      </div>
 
       <div className="board-overlay top">
         <div className="toast glass">{banner}</div>
@@ -361,19 +406,24 @@ export default function GameView({ session, onLeave }: Props) {
             </p>
             {recorded ? (
               <>
-                <p style={{ margin: "0 0 18px" }}><span className="tag good">Recorded on-chain ✓</span></p>
+                <p style={{ margin: "0 0 10px" }}><span className="tag good">Recorded on-chain ✓</span></p>
+                {iWon && (
+                  <p className="win-token-earned" style={{ margin: "0 0 18px" }}>🏆 You earned a win token!</p>
+                )}
                 <button className="btn-glass btn-block" onClick={onLeave}>← Back to lobby</button>
               </>
             ) : (
               <div className="col">
                 <p className="muted" style={{ margin: "0 0 4px" }}>
-                  Record the result on-chain: <strong>Submit</strong> your moves, then <strong>Redeem</strong> once the challenge window closes.
+                  Record the result on-chain: <strong>Submit</strong> your moves, then{" "}
+                  <strong>Redeem</strong> once the challenge window closes.
+                  {iWon && <> Winning mints you a 🏆 <strong>win-token</strong>.</>}
                 </p>
                 <button className="btn-o btn-block" disabled={!actions.canSettle || actions.busy !== null} onClick={actions.settle}>
                   {actions.busy === "Submit" ? "Submitting…" : actions.canSettle ? "Submit result" : "Submitted — wait for window"}
                 </button>
                 <button className="btn-o btn-block" disabled={!actions.canClaimResult || actions.busy !== null} onClick={actions.claimResult}>
-                  {actions.busy === "Redeem" ? "Redeeming…" : "Redeem"}
+                  {actions.busy === "Redeem" ? "Redeeming…" : iWon ? "Redeem — mint win token 🏆" : "Redeem"}
                 </button>
                 {actions.error && <div className="error">{actions.error}</div>}
                 <button className="back-link" onClick={() => setWinDismissed(true)}>Hide — view the board</button>

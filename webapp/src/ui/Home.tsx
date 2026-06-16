@@ -8,6 +8,8 @@ import { submitCreateGame, submitJoin } from "../wallet/submit.ts";
 import Board3D from "./Board3D.tsx";
 import { emptyBoard, fullReserves } from "../../../src/sdk/game/rules.ts";
 import { randomGameId } from "../../../src/sdk/crypto/persistent-hash.ts";
+import { useWallet, isConnected, openWalletModal } from "../wallet/useWallet.ts";
+import { pingRelay } from "../api/ws.ts";
 
 export interface HomeProps {
   onOpen: (session: PlayerSession) => void;
@@ -51,13 +53,33 @@ export default function Home({ onOpen }: HomeProps) {
   const [reconRole, setReconRole] = useState<Role>("o");
   const [saved, setSaved] = useState<IndexEntry[]>([]);
   const [states, setStates] = useState<Record<string, string>>({});
+  const wallet = useWallet();
+  const connected = isConnected(wallet);
+  const [relayUp, setRelayUp] = useState<boolean | null>(null); // null = still checking
+
+  // Lobby actions require a connected wallet (the local Session Wallet + Auto
+  // Faucet, or a real extension). If none, open the Wallet panel to prompt one.
+  const gated = (action: () => void) => () => {
+    if (!connected) {
+      setError("Connect a wallet to play — choose one in the Wallet panel.");
+      openWalletModal();
+      return;
+    }
+    action();
+  };
 
   useEffect(() => {
     const list = listSessions();
     setSaved(list);
     api.health()
-      .then((h) => logEvent(`relay healthy${h.arena ? ` — arena ${h.arena.slice(0, 12)}…` : ""}`))
-      .catch((e) => logEvent(`! relay unreachable: ${(e as Error).message}`));
+      .then((h) => logEvent(`chain reachable${h.arena ? ` — arena ${h.arena.slice(0, 12)}…` : ""}`))
+      .catch((e) => logEvent(`! chain unreachable: ${(e as Error).message}`));
+    // Ping the multiplayer relay — when it's offline (e.g. a static deploy with no
+    // relay server) the multiplayer modes are disabled; Practice vs AI still works.
+    pingRelay().then((up) => {
+      setRelayUp(up);
+      logEvent(up ? "relay: online — multiplayer available" : "relay: offline — Practice vs AI only");
+    });
     // Fetch each saved game's on-chain state for the Reconnect list.
     const seen = new Set<string>();
     for (const e of list) {
@@ -177,7 +199,7 @@ export default function Home({ onOpen }: HomeProps) {
       <div className="landing">
         <div className="landing-card glass">
           <p className="brand"><span className="x">STACKED</span> 4×4 · MIDNIGHT</p>
-          <h1 className="title">On-chain Gobblet</h1>
+          <h1 className="title">Nix-Nax</h1>
           <p className="muted">
             A{" "}
             <Term word="trustless" tip="No referee or central server to trust — the rules are enforced on-chain by the contract and cryptographic proofs, so neither player can cheat or be cheated." />{" "}
@@ -190,12 +212,25 @@ export default function Home({ onOpen }: HomeProps) {
           </p>
 
           {view === "menu" && (
-            <div className="choices">
-              <button className="btn-x" onClick={() => newGame(false)}>New game</button>
-              <button className="btn-o" onClick={() => { setError(null); setView("join"); }}>Join a game</button>
-              <button className="btn-glass" onClick={() => newGame(true)}>🤖 Practice vs AI</button>
-              <button className="btn-glass" onClick={() => { setError(null); setView("reconnect"); }}>Reconnect</button>
-            </div>
+            <>
+              {!connected && (
+                <p className="muted" style={{ margin: "0 0 10px", fontSize: 13 }}>
+                  🔑 Connect a wallet to play — use the <strong>Wallet</strong> button (top-right).
+                </p>
+              )}
+              {relayUp === false && (
+                <p className="muted" style={{ margin: "0 0 10px", fontSize: 13 }}>
+                  📡 Multiplayer relay offline — <strong>New game</strong>, <strong>Join</strong> and{" "}
+                  <strong>Reconnect</strong> need it. <strong>Practice vs AI</strong> runs fully in your browser.
+                </p>
+              )}
+              <div className="choices">
+                <button className="btn-x" disabled={relayUp === false} onClick={gated(() => newGame(false))}>New game</button>
+                <button className="btn-o" disabled={relayUp === false} onClick={gated(() => { setError(null); setView("join"); })}>Join a game</button>
+                <button className="btn-glass" onClick={gated(() => newGame(true))}>🤖 Practice vs AI</button>
+                <button className="btn-glass" disabled={relayUp === false} onClick={gated(() => { setError(null); setView("reconnect"); })}>Reconnect</button>
+              </div>
+            </>
           )}
 
           {view === "join" && (
@@ -242,6 +277,13 @@ export default function Home({ onOpen }: HomeProps) {
           )}
 
           {error && <div className="error">{error}</div>}
+
+          <p className="repo-note">
+            Check out the full source code at{" "}
+            <a href="https://github.com/effectstream/nix-nax" target="_blank" rel="noreferrer">
+              github.com/effectstream/nix-nax
+            </a>
+          </p>
         </div>
       </div>
 

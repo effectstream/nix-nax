@@ -206,15 +206,26 @@ describe("settle (placement + win)", () => {
     expect(d.winner).toBe(Winner.x);
   });
 
-  test("claimResult finalises after the window", () => {
+  const RECIP = { bytes: new Uint8Array(32).fill(7) }; // dummy ZswapCoinPublicKey
+
+  test("winner finalises + mints a win-token after the window", () => {
     const pair = playersC();
-    const { contract, privateState, state } = setup(pair);
+    const { contract, privateState, state } = setup(pair); // private state = X's secret (X wins)
     const s1 = settleChunk(contract, state, privateState, pair, 0, WIN_X, { until: 1500n });
     const ctx = newCircuitCtx(s1, privateState, 2000);
-    const fin = (contract.impureCircuits as any).claimResult(ctx, pair.gameId);
+    const fin = (contract.impureCircuits as any).claimResult(ctx, pair.gameId, RECIP);
     const d = dynOf(led(fin.context.currentQueryContext.state), pair);
     expect(d.status).toBe(Status.settled);
     expect(d.winner).toBe(Winner.x);
+  });
+
+  test("the loser cannot finalise a decided game", () => {
+    const pair = playersC();
+    const { contract, privateState, state } = setup(pair, pair.o.secret); // O = loser
+    const s1 = settleChunk(contract, state, privateState, pair, 0, WIN_X, { until: 1500n });
+    const ctx = newCircuitCtx(s1, privateState, 2000);
+    expect(() => (contract.impureCircuits as any).claimResult(ctx, pair.gameId, RECIP))
+      .toThrow(/only the winner/);
   });
 });
 
@@ -269,13 +280,14 @@ describe("settle (removal)", () => {
     expect(topAt(l, pair, 2)).toBe(2);
   });
 
-  test("removing your own piece is rejected", () => {
+  test("removing your OWN piece is allowed — returns to your reserve", () => {
     const pair = playersA();
     const { contract, privateState, state } = setup(pair);
-    expect(() =>
-      settleChunk(contract, state, privateState, pair, 0,
-        [P(2, 0), P(4, 0), P(0, 0), P(15, 0), P(5, 0), R(4)]),
-    ).toThrow(/visible piece is not the opponent's/);
+    // X c2, O c4, X c0, O c15, X c5, then O (turn 5 = remove) takes its OWN c4.
+    const l = led(settleChunk(contract, state, privateState, pair, 0,
+      [P(2, 0), P(4, 0), P(0, 0), P(15, 0), P(5, 0), R(4)]));
+    expect(topAt(l, pair, 4)).toBe(0);          // O's own c4 is gone
+    expect(reserveOf(l, pair, 2, 0)).toBe(2);   // returned to O (placed 2 size-0, removed 1)
   });
 
   test("pass while a removal exists is rejected", () => {

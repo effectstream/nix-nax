@@ -13,6 +13,10 @@ import { resetArena } from "../chain/arena.ts";
 import { logEvent } from "../game/log-store.ts";
 
 const SESSION_SEED_KEY = "ttt:session-wallet-seed";
+// The session wallet mints NIGHT from the local genesis seed, which only exists on
+// the `undeployed` dev chain — so it must never be offered on a real network.
+const NETWORK_ID = (import.meta as { env?: Record<string, string> }).env?.VITE_NETWORK_ID ?? "undeployed";
+export const sessionWalletAvailable = NETWORK_ID === "undeployed";
 const FUND_AMOUNT = 50_000_000_000_000n; // NIGHT moved genesis → session
 const ttl = () => new Date(Date.now() + 30 * 60 * 1000);
 
@@ -44,6 +48,9 @@ export interface FaucetResult {
 // Fund the session wallet (if needed), register it for dust, and activate it as
 // the gas wallet. Idempotent: re-running once funded just re-activates it.
 export async function runFaucet(log: (s: string) => void = logEvent): Promise<FaucetResult> {
+  if (!sessionWalletAvailable) {
+    throw new Error(`session wallet / auto-faucet is undeployed-only (network is "${NETWORK_ID}")`);
+  }
   const session = await getSessionWallet();
   log(`faucet: session wallet ${session.unshieldedAddress.slice(0, 24)}…`);
   let funds = await waitForFunds(session, { requireShielded: false });

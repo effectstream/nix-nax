@@ -51,7 +51,14 @@ export function useChainActions(
   const challengeOpen = !!chain?.hasChallenge;
   const challengeExpired =
     challengeOpen && Number(chain!.challengeUntil) <= Math.floor(Date.now() / 1000);
-  const canClaimResult = !settled && !halfOpen && challengeExpired;
+  // A decided game (winner x=1 / o=2) can only be finalised by the winner — who
+  // mints the win-token. A draw / undecided settlement is finalisable by either
+  // participant (no mint). So hide "Redeem" from the loser.
+  const myMark = session.role === "x" ? 1 : 2;
+  const decidedWinner = chain?.winner === 1 || chain?.winner === 2;
+  const iWon = decidedWinner && chain?.winner === myMark;
+  const canClaimResult =
+    !settled && !halfOpen && challengeExpired && (!decidedWinner || iWon);
   const deadlineExpired =
     !!chain?.hasDeadline && Number(chain.deadline) <= Math.floor(Date.now() / 1000);
   const canClaimTimeout = !settled && !halfOpen && deadlineExpired;
@@ -107,7 +114,7 @@ export function useChainActions(
     }),
 
     claimResult: wrap("Redeem", async () => {
-      const r = await api.claimResult(session.gameId);
+      const r = await api.claimResult(session.gameId, hex(session.keys.secret));
       logEvent(`claim-result: tx ${r.txId}`);
     }),
 

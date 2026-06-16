@@ -6,7 +6,7 @@
 // makes it the gas payer. Injected extension wallets (testnet) can also connect.
 
 import { useState } from "react";
-import { connect, useWallet, listWallets, NETWORK_ID, type InitialAPI } from "../wallet/useWallet.ts";
+import { connect, connectSessionWallet, useWallet, isConnected, openWalletModal, closeWalletModal, listWallets, NETWORK_ID, type InitialAPI } from "../wallet/useWallet.ts";
 import { runFaucet, type FaucetResult } from "../wallet/faucet.ts";
 
 // Long bech32 addresses → short, readable form: first 10 … last 6.
@@ -14,21 +14,23 @@ const shortAddr = (a: string): string => (a.length <= 18 ? a : `${a.slice(0, 10)
 
 export default function WalletButton() {
   const wallet = useWallet();
-  const [open, setOpen] = useState(false);
+  const open = wallet.modalOpen;
   const [faucetRunning, setFaucetRunning] = useState(false);
   const [faucetLog, setFaucetLog] = useState<string[]>([]);
   const [session, setSession] = useState<FaucetResult | null>(null);
   const wallets = listWallets();
   const isLocal = NETWORK_ID === "undeployed";
 
+  const connected = isConnected(wallet);
   const label = session
     ? shortAddr(session.address)
-    : wallet.mode === "wallet"
-      ? (wallet.address ? shortAddr(wallet.address) : (wallet.name ?? "Connected"))
-      : "Wallet";
-  const connected = !!session || wallet.mode === "wallet";
+    : wallet.address
+      ? shortAddr(wallet.address)
+      : connected
+        ? (wallet.name ?? "Connected")
+        : "Wallet";
 
-  const pickWallet = async (w: InitialAPI) => { setOpen(false); await connect(w); };
+  const pickWallet = async (w: InitialAPI) => { closeWalletModal(); await connect(w); };
 
   const doFaucet = () => {
     setFaucetRunning(true);
@@ -37,6 +39,7 @@ export default function WalletButton() {
       try {
         const r = await runFaucet((s) => setFaucetLog((l) => [...l.slice(-7), s]));
         setSession(r);
+        connectSessionWallet(r.address);
       } catch (e) {
         setFaucetLog((l) => [...l, "❌ " + (e as Error).message]);
       } finally {
@@ -49,7 +52,7 @@ export default function WalletButton() {
     <>
       <button
         className={`wallet-btn glass ${connected ? "connected wallet" : ""}`}
-        onClick={() => setOpen(true)}
+        onClick={openWalletModal}
         title={session?.address ?? wallet.address ?? undefined}
       >
         <span className={`wallet-dot ${connected ? "wallet" : "off"}`} />
@@ -57,7 +60,7 @@ export default function WalletButton() {
       </button>
 
       {open && (
-        <div className="modal-overlay" onClick={() => setOpen(false)}>
+        <div className="modal-overlay" onClick={closeWalletModal}>
           <div className="modal-card glass wallet-modal" onClick={(e) => e.stopPropagation()}>
             <h2 className="modal-title">Wallet</h2>
             <p className="muted" style={{ marginTop: 0 }}>
@@ -71,7 +74,7 @@ export default function WalletButton() {
                   <>
                     <div className="wallet-row static">
                       <span className="wallet-dot wallet" />
-                      <span className="name">Session wallet</span>
+                      <span className="name">Session Wallet + Auto Faucet</span>
                       <span className="pay">pays gas</span>
                     </div>
                     <p className="wallet-addr-full mono">{session.address}</p>
@@ -79,7 +82,7 @@ export default function WalletButton() {
                   </>
                 ) : (
                   <button className="btn-glass btn-block" onClick={doFaucet} disabled={faucetRunning}>
-                    {faucetRunning ? "Funding session wallet…" : "🚰 Fund a session wallet (faucet)"}
+                    {faucetRunning ? "Connecting…" : "🚰 Session Wallet + Auto Faucet"}
                   </button>
                 )}
                 {faucetLog.length > 0 && <pre className="faucet-log">{faucetLog.join("\n")}</pre>}

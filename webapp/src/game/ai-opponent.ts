@@ -19,7 +19,7 @@ import {
   encodeMove,
   type SerializedSession,
 } from "./player-session.ts";
-import { connectRelay, type RelayClient } from "../api/ws.ts";
+import { localRelay, type RelayClient } from "../api/ws.ts";
 import { api } from "../chain/arena.ts";
 import { logEvent } from "./log-store.ts";
 import { chooseAction } from "./ai-policy.ts";
@@ -146,7 +146,7 @@ export function startAiOpponent(gameId: string): AiHandle {
         persist();
       }
       if (stopped) return;
-      client = connectRelay(gameId, "o", onMessage, (s) => {
+      client = localRelay(gameId, "o", onMessage, (s) => {
         if (s === "open") setTimeout(actIfReady, 300); // in case it's already our turn (replayed history)
       });
     } catch (e) {

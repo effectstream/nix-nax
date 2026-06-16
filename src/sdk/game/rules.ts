@@ -129,11 +129,11 @@ export function anyLegalPlace(board: Uint8Array, reserves: Uint8Array, mark: Mar
   return false;
 }
 
-// Remove: the cell's visible piece belongs to the opponent.
-export function canRemove(board: Uint8Array, mark: Mark, cell: number): boolean {
+// Remove: any visible piece can be taken — yours OR the opponent's. The piece
+// goes back to its owner's reserve (see applyAction). `mark` is unused now.
+export function canRemove(board: Uint8Array, _mark: Mark, cell: number): boolean {
   if (cell < 0 || cell >= CELLS) return false;
-  const top = topOf(board, cell);
-  return top !== null && top.mark === opp(mark);
+  return topOf(board, cell) !== null;
 }
 
 export function anyLegalRemove(board: Uint8Array, mark: Mark): boolean {
@@ -178,7 +178,7 @@ export function validateAction(
     case KIND_REMOVE:
       if (size !== 0) return { ok: false, reason: "remove must use size=0 (canonical)" };
       if (!canRemove(board, mark, cell)) {
-        return { ok: false, reason: `no opponent piece on top of cell ${cell}` };
+        return { ok: false, reason: `nothing to remove on cell ${cell}` };
       }
       return { ok: true };
     case KIND_PASS:

@@ -10,6 +10,7 @@ import {
   buildAndFundWallet,
   type ArenaHandle,
 } from "../../src/sdk/deploy.ts";
+import { encodeCoinPublicKey } from "@midnight-ntwrk/compact-runtime";
 import { NETWORK } from "../../src/sdk/env.ts";
 import { packChunk, type TestPair, type ScriptMove } from "../helpers/fixtures.ts";
 
@@ -73,7 +74,16 @@ export async function openGame(pair: TestPair): Promise<GameHandle> {
       return t.public.txId as string;
     },
     async claimResult() {
-      const t = await (a.found as any).callTx.claimResult(pair.gameId);
+      // Winner-only now: attach with X's secret (callerMark) and mint the
+      // win-token to X's wallet (recipient = its shielded coin public key).
+      const { found } = await attachWithSecret({
+        contractAddress: a.contractAddress,
+        wallet: a.wallet,
+        secret: pair.x.secret,
+        storeSuffix: `e2e-cr-${Buffer.from(pair.gameId).toString("hex").slice(0, 8)}`,
+      });
+      const recipient = { bytes: encodeCoinPublicKey((a.wallet as any).zswapSecretKeys.coinPublicKey) };
+      const t = await (found as any).callTx.claimResult(pair.gameId, recipient);
       return t.public.txId as string;
     },
     async startTimeoutAsX(untilTime) {

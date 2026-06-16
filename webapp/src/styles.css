@@ -118,6 +118,9 @@ input[type="text"]::placeholder { color: #5d6b86; }
 .wallet-status { text-align: center; font-size: 12px; color: var(--fg-1); padding: 4px 0; }
 .link-btn { background: none; border: none; color: var(--o); padding: 0; font-size: 12px; text-decoration: underline; cursor: pointer; }
 .link-btn:hover { filter: brightness(1.2); }
+.repo-note { margin: 20px 0 0; padding-top: 14px; border-top: 1px solid var(--glass-border); text-align: center; font-size: 12px; color: var(--fg-1); line-height: 1.5; }
+.repo-note a { color: var(--o); text-decoration: none; }
+.repo-note a:hover { text-decoration: underline; }
 .field { display: flex; gap: 10px; margin-top: 16px; align-items: center; }
 .field > input[type="text"] { flex: 1; min-width: 0; }       /* the input shrinks… */
 .field > .seg, .field > button { flex-shrink: 0; }           /* …not the toggle/buttons */
@@ -150,8 +153,24 @@ input[type="text"]::placeholder { color: #5d6b86; }
 
 /* ── Hamburger + blockchain drawer ───────────────────────────────────────── */
 .hamburger { position: absolute; top: 16px; left: 16px; z-index: 20; width: 44px; height: 44px; display: grid; place-items: center; font-size: 18px; padding: 0; }
-.vsai-chip { position: absolute; top: 60px; right: 18px; z-index: 18; padding: 6px 12px; font-size: 11px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--fg-1); }
-.vsai-chip .accent { color: var(--o); }
+/* Top-right game-info panel (under the wallet button): game id + invite. */
+.gi-stack { position: absolute; top: 62px; right: 16px; z-index: 18; display: flex; flex-direction: column; gap: 10px; width: min(248px, 72vw); }
+.game-info { width: 100%; padding: 10px 12px; display: flex; flex-direction: column; gap: 7px; }
+.game-info .gi-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.gi-label { font-size: 10px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--fg-1); }
+.vsai-inline { font-size: 10px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; color: var(--fg-1); }
+.vsai-inline .accent { color: var(--o); }
+.gi-id { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; padding: 6px 10px; border-radius: 9px; background: rgba(255, 255, 255, 0.05); }
+.gi-id .mono { font-family: ui-monospace, monospace; font-size: 12px; color: var(--fg-0); }
+.gi-id .gi-copy { font-size: 10px; font-weight: 600; color: var(--o); text-transform: uppercase; letter-spacing: 0.5px; flex-shrink: 0; }
+.gi-invite { margin: 0; font-size: 11px; line-height: 1.5; color: var(--fg-1); }
+.gi-invite strong { color: var(--fg-0); }
+.win-token-panel { position: relative; display: flex; align-items: center; gap: 8px; padding: 9px 12px; cursor: help; outline: none; }
+.win-token-icon { font-size: 15px; line-height: 1; }
+.win-token-label { flex: 1; font-size: 10px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; color: #ffd76a; }
+.win-token-count { font-family: ui-monospace, monospace; font-size: 15px; font-weight: 800; color: #ffd76a; text-shadow: 0 0 10px rgba(255, 200, 60, 0.45); }
+.win-token-panel .tip { left: 0; transform: none; top: calc(100% + 8px); bottom: auto; }
+.win-token-panel:hover .tip, .win-token-panel:focus .tip, .win-token-panel:focus-visible .tip { opacity: 1; visibility: visible; }
 .drawer-backdrop { position: absolute; inset: 0; z-index: 30; background: rgba(0, 0, 0, 0.4); animation: fade-in 0.18s ease; }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 .drawer { position: absolute; top: 0; left: 0; height: 100%; width: min(380px, 92vw); z-index: 31; border-radius: 0 18px 18px 0; padding: 16px 18px 24px; overflow-y: auto; animation: drawer-in 0.18s ease; }
@@ -180,6 +199,7 @@ input[type="text"]::placeholder { color: #5d6b86; }
 .win-headline.x { color: var(--x); }
 .win-headline.o { color: var(--o); }
 .win-headline.draw { color: var(--fg-0); }
+.win-token-earned { font-size: 15px; font-weight: 700; color: #ffd76a; text-shadow: 0 0 12px rgba(255, 200, 60, 0.55); }
 
 /* ── Centered modal popup (e.g. "no plays available") ─────────────────────── */
 .modal-overlay { position: absolute; inset: 0; z-index: 26; display: grid; place-items: center; padding: 20px; background: rgba(0, 0, 0, 0.45); animation: fade-in 0.18s ease; }
@@ -250,10 +270,22 @@ input[type="text"]::placeholder { color: #5d6b86; }
 .die-stage.throwable .die-scene { pointer-events: auto; cursor: pointer; }
 .die-stage.throwable .die-scene:hover .die { filter: brightness(1.18); }
 .die.ready { animation: die-idle 2s ease-in-out infinite; }
-.die.ready .f-front { border-color: rgba(159, 176, 204, 0.45); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 0 16px rgba(159, 176, 204, 0.28); }
+/* Your roll turn: a pulsing blue glow on the die so it grabs attention. */
+.die.ready .f-front { border-color: rgba(74, 163, 255, 0.7); animation: die-glow 1.15s ease-in-out infinite; }
 @keyframes die-idle {
   0%, 100% { transform: rotateX(-17deg) rotateY(13deg) translateY(0); }
   50%      { transform: rotateX(-17deg) rotateY(18deg) translateY(-4px); }
+}
+@keyframes die-glow {
+  0%, 100% { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 12px rgba(74, 163, 255, 0.4); }
+  50%      { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 0 28px 5px rgba(74, 163, 255, 0.9); }
+}
+/* Pulse the "Tap to roll" prompt + caption to reinforce the call to action. */
+.die-stage.throwable .die-label { color: var(--o); font-weight: 700; animation: die-prompt 1.15s ease-in-out infinite; }
+.die-stage.throwable .die-caption { color: var(--o); opacity: 0.95; }
+@keyframes die-prompt {
+  0%, 100% { opacity: 0.65; }
+  50%      { opacity: 1; }
 }
 
 /* ── Status key/values + tags + turn ledger (reused in the drawer) ───────── */

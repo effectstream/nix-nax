@@ -460,31 +460,32 @@ export circuit settle(
         tops.lookup(gid).insert(cell as Uint<16>, mark);
       }
       if (kind == 2) {
-        // REMOVE — top must be the opponent's; returns to their reserve.
+        // REMOVE — any visible piece (yours OR the opponent's); returns to its
+        // OWNER's reserve (the mark stored at the removed layer).
         assert(size == 0, "remove uses canonical size 0");
         const l3 = boardAt(gid, (cell * 4 + 3) as Uint<16>);
         const l2 = boardAt(gid, (cell * 4 + 2) as Uint<16>);
         const l1 = boardAt(gid, (cell * 4 + 1) as Uint<16>);
         const l0 = boardAt(gid, (cell * 4) as Uint<16>);
         const visible = l3 != 0 ? l3 : (l2 != 0 ? l2 : (l1 != 0 ? l1 : l0));
-        assert(visible == oppMark, "cell's visible piece is not the opponent's");
+        assert(visible != 0, "cell is empty — nothing to remove");
         if (l3 != 0) {
           boards.lookup(gid).insert((cell * 4 + 3) as Uint<16>, 0 as Uint<8>);
-          returnToReserve(gid, oppMark, 3 as Uint<8>);
+          returnToReserve(gid, l3, 3 as Uint<8>);
           tops.lookup(gid).insert(cell as Uint<16>, l2 != 0 ? l2 : (l1 != 0 ? l1 : l0));
         } else {
           if (l2 != 0) {
             boards.lookup(gid).insert((cell * 4 + 2) as Uint<16>, 0 as Uint<8>);
-            returnToReserve(gid, oppMark, 2 as Uint<8>);
+            returnToReserve(gid, l2, 2 as Uint<8>);
             tops.lookup(gid).insert(cell as Uint<16>, l1 != 0 ? l1 : l0);
           } else {
             if (l1 != 0) {
               boards.lookup(gid).insert((cell * 4 + 1) as Uint<16>, 0 as Uint<8>);
-              returnToReserve(gid, oppMark, 1 as Uint<8>);
+              returnToReserve(gid, l1, 1 as Uint<8>);
               tops.lookup(gid).insert(cell as Uint<16>, l0);
             } else {
               boards.lookup(gid).insert((cell * 4) as Uint<16>, 0 as Uint<8>);
-              returnToReserve(gid, oppMark, 0 as Uint<8>);
+              returnToReserve(gid, l0, 0 as Uint<8>);
               tops.lookup(gid).insert(cell as Uint<16>, 0 as Uint<8>);
             }
           }
@@ -497,7 +498,7 @@ export circuit settle(
 
       const tw = readTops(gid);
       if (kind == 3) {
-        assert(!anyTopOf(oppMark, tw), "pass not allowed: an opponent piece is removable");
+        assert(!anyTopOf(1 as Uint<8>, tw) && !anyTopOf(2 as Uint<8>, tw), "pass not allowed: a piece is removable");
       }
 
       actionLogs.lookup(gid).insert(tAbs, (par * 256 + kind * 64 + size * 16 + cell) as Uint<16>);
@@ -534,19 +535,39 @@ export circuit settle(
   });
 }
 
-// Finalise after the challenge window expires. Permissionless.
-export circuit claimResult(gameId: Bytes<32>): [] {
+// Finalise after the challenge window expires. The WINNER (proving knowledge of
+// their player secret) finalises a decided game and mints themselves 1 "Nix-Nax
+// win" shielded token to `recipient`. A draw may be finalised by either player
+// (no mint). The loser has no reason to call this — and is rejected on a decided
+// game so they can't grief the winner's reward.
+export circuit claimResult(gameId: Bytes<32>, recipient: ZswapCoinPublicKey): [] {
   const gid = disclose(gameId);
   const d = gameState.lookup(gid);
   assert(d.status == Status.inProgress, "already settled");
   assert(d.hasChallenge, "no settlement to finalise");
   assert(blockTimeGte(d.challengeUntil), "challenge window still open");
+
+  const me = callerMark(gid);    // asserts the caller is a registered player (x or o)
+  const decided = d.winner == Winner.x || d.winner == Winner.o;
+  if (decided) {
+    assert(me == (d.winner == Winner.x ? 1 as Uint<8> : 2 as Uint<8>),
+      "only the winner can finalise a decided game");
+  }
+
   gameState.insert(gid, GameDyn {
     turnMark: d.turnMark, committedTurns: d.committedTurns,
     status: Status.settled, winner: d.winner,
     deadline: d.deadline, hasDeadline: d.hasDeadline,
     challengeUntil: 0, hasChallenge: false
   });
+
+  if (decided) {
+    // One stable token color for all wins (balance of it = your win count);
+    // nonce is unique per game so each game mints exactly once.
+    const nonce = persistentHash<Vector<2, Bytes<32>>>([pad(32, "nixnax:win:nonce:"), gid]);
+    mintShieldedToken(pad(32, "nixnax:win"), 1, nonce,
+      left<ZswapCoinPublicKey, ContractAddress>(disclose(recipient)));
+  }
 }
 
 // ---------------------------------------------------------------------------

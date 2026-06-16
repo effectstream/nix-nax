@@ -1,1 +1,0 @@
-X completes the diagonal. The local game ends. Now X submits one settle transaction. The contract replays every move and verifies every token's Merkle path under the right player's root. One proof, for the whole game.
