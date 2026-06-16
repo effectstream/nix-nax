@@ -179,11 +179,14 @@ export async function registerNightForDust(bundle: WalletBundle): Promise<boolea
     bundle.unshieldedKeystore.getPublicKey(),
     (payload: Uint8Array) => bundle.unshieldedKeystore.signData(payload),
   );
-  const signed: UnprovenTransaction = await (bundle.wallet as any).signUnprovenTransaction(
-    recipe.transaction,
-    (payload: Uint8Array) => bundle.unshieldedKeystore.signData(payload),
+  // Signing already happened INSIDE registerNightUtxosForDustGeneration (the 3rd
+  // arg) — just finalize the recipe and submit. NO extra signRecipe /
+  // signUnprovenTransaction step (those re-signed/bypassed the recipe and the
+  // chain rejected the tx as invalid, 1010 / Custom error 192). Matches the
+  // canonical effectstream-a get-wallet-info.ts registerNightForDust.
+  const txId = await bundle.wallet.submitTransaction(
+    await (bundle.wallet as any).finalizeRecipe(recipe),
   );
-  const txId = await bundle.wallet.submitTransaction(await (bundle.wallet as any).finalizeTransaction(signed));
   log.info(`Dust registration tx submitted: ${txId}`);
 
   // Wait for dust to appear.

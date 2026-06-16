@@ -88,7 +88,8 @@ export default defineConfig({
       allow: [".."],
     },
     proxy: {
-      "/api":   { target: "http://localhost:4310", changeOrigin: true },
+      // Chain calls go direct to the indexer/node/proof server (CORS-open); only
+      // the off-chain message relay is proxied now.
       "/relay": { target: "ws://localhost:4310", ws: true, changeOrigin: true },
     },
   },

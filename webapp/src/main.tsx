@@ -20,6 +20,11 @@ if (location.hash.replace("#", "") === "board-dev") {
   import("./dev/wallet-smoke.tsx").then(({ default: WalletSmoke }) => {
     root.render(<WalletSmoke />);
   });
+} else if (location.hash.replace("#", "") === "faucet-dev") {
+  // Faucet smoke: genesis → session NIGHT transfer + dust registration.
+  import("./dev/faucet-smoke.tsx").then(({ default: FaucetSmoke }) => {
+    root.render(<FaucetSmoke />);
+  });
 } else {
   root.render(
     <React.StrictMode>

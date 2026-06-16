@@ -121,6 +121,12 @@ async function attach(): Promise<{ found: any; providers: any; addr: string }> {
   return handleP;
 }
 
+// Drop the cached handle so the next action re-attaches — e.g. after the faucet
+// swaps the active gas wallet (setGasWallet) to a funded session wallet.
+export function resetArena(): void {
+  handleP = null;
+}
+
 // A separate handle with the caller's secret in private state — startTimeout
 // consumes the localSecret witness (mirrors src/sdk/deploy.ts attachWithSecret).
 async function attachWithSecret(secret: Uint8Array): Promise<{ found: any }> {

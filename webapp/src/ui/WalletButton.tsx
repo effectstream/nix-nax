@@ -1,19 +1,13 @@
 // Permanent top-right wallet control (rendered at the App level, so it's on the
-// lobby and in-game alike). Disconnected: a "Connect wallet" pill that opens a
-// modal listing the injected Midnight wallets — plus a "Local wallet" option on
-// the undeployed dev network (relay pays gas). Connected: shows the wallet's
-// address in short human-readable form; the modal then offers Disconnect.
+// lobby and in-game alike). Post-serverless: every tx is built + submitted in the
+// browser, and gas is paid by an in-browser wallet (the genesis wallet by
+// default). On the `undeployed` dev network, the modal offers a FAUCET that mints
+// a session wallet, funds it with NIGHT from genesis, registers it for dust, and
+// makes it the gas payer. Injected extension wallets (testnet) can also connect.
 
 import { useState } from "react";
-import {
-  connect,
-  connectLocal,
-  disconnect,
-  useWallet,
-  listWallets,
-  NETWORK_ID,
-  type InitialAPI,
-} from "../wallet/useWallet.ts";
+import { connect, useWallet, listWallets, NETWORK_ID, type InitialAPI } from "../wallet/useWallet.ts";
+import { runFaucet, type FaucetResult } from "../wallet/faucet.ts";
 
 // Long bech32 addresses → short, readable form: first 10 … last 6.
 const shortAddr = (a: string): string => (a.length <= 18 ? a : `${a.slice(0, 10)}…${a.slice(-6)}`);
@@ -21,50 +15,79 @@ const shortAddr = (a: string): string => (a.length <= 18 ? a : `${a.slice(0, 10)
 export default function WalletButton() {
   const wallet = useWallet();
   const [open, setOpen] = useState(false);
+  const [faucetRunning, setFaucetRunning] = useState(false);
+  const [faucetLog, setFaucetLog] = useState<string[]>([]);
+  const [session, setSession] = useState<FaucetResult | null>(null);
   const wallets = listWallets();
-  const showLocal = NETWORK_ID === "undeployed";
+  const isLocal = NETWORK_ID === "undeployed";
 
-  const label = wallet.connecting
-    ? "Connecting…"
+  const label = session
+    ? shortAddr(session.address)
     : wallet.mode === "wallet"
-      ? wallet.address ? shortAddr(wallet.address) : (wallet.name ?? "Connected")
-      : wallet.mode === "local"
-        ? "Local wallet"
-        : "Connect wallet";
+      ? (wallet.address ? shortAddr(wallet.address) : (wallet.name ?? "Connected"))
+      : "Wallet";
+  const connected = !!session || wallet.mode === "wallet";
 
   const pickWallet = async (w: InitialAPI) => { setOpen(false); await connect(w); };
-  const pickLocal = () => { setOpen(false); connectLocal(); };
+
+  const doFaucet = () => {
+    setFaucetRunning(true);
+    setFaucetLog([]);
+    void (async () => {
+      try {
+        const r = await runFaucet((s) => setFaucetLog((l) => [...l.slice(-7), s]));
+        setSession(r);
+      } catch (e) {
+        setFaucetLog((l) => [...l, "❌ " + (e as Error).message]);
+      } finally {
+        setFaucetRunning(false);
+      }
+    })();
+  };
 
   return (
     <>
       <button
-        className={`wallet-btn glass ${wallet.mode ? `connected ${wallet.mode}` : ""}`}
+        className={`wallet-btn glass ${connected ? "connected wallet" : ""}`}
         onClick={() => setOpen(true)}
-        disabled={wallet.connecting}
-        title={wallet.address ?? undefined}
+        title={session?.address ?? wallet.address ?? undefined}
       >
-        <span className={`wallet-dot ${wallet.mode ?? "off"}`} />
+        <span className={`wallet-dot ${connected ? "wallet" : "off"}`} />
         <span className="wallet-label">{label}</span>
       </button>
 
       {open && (
         <div className="modal-overlay" onClick={() => setOpen(false)}>
           <div className="modal-card glass wallet-modal" onClick={(e) => e.stopPropagation()}>
-            <h2 className="modal-title">{wallet.mode ? "Wallet" : "Connect a wallet"}</h2>
+            <h2 className="modal-title">Wallet</h2>
+            <p className="muted" style={{ marginTop: 0 }}>
+              Transactions are built, proven, and submitted in your browser — no server. Gas is
+              paid by an in-browser wallet.
+            </p>
 
-            {wallet.mode ? (
-              <div className="col">
-                <div className="wallet-row static">
-                  <span className={`wallet-dot ${wallet.mode}`} />
-                  <span className="name">{wallet.name}</span>
-                  <span className="pay">{wallet.mode === "wallet" ? "you pay gas" : "relay pays gas"}</span>
-                </div>
-                {wallet.address && <p className="wallet-addr-full mono">{wallet.address}</p>}
-                {wallet.dust && <p className="muted" style={{ margin: 0 }}>dust {String(wallet.dust.balance)} / {String(wallet.dust.cap)}</p>}
-                <button className="btn-glass btn-block" onClick={() => { setOpen(false); disconnect(); }}>Disconnect</button>
+            {isLocal && (
+              <div className="col" style={{ marginTop: 4 }}>
+                {session ? (
+                  <>
+                    <div className="wallet-row static">
+                      <span className="wallet-dot wallet" />
+                      <span className="name">Session wallet</span>
+                      <span className="pay">pays gas</span>
+                    </div>
+                    <p className="wallet-addr-full mono">{session.address}</p>
+                    <p className="muted" style={{ margin: 0 }}>dust {String(session.dust)}</p>
+                  </>
+                ) : (
+                  <button className="btn-glass btn-block" onClick={doFaucet} disabled={faucetRunning}>
+                    {faucetRunning ? "Funding session wallet…" : "🚰 Fund a session wallet (faucet)"}
+                  </button>
+                )}
+                {faucetLog.length > 0 && <pre className="faucet-log">{faucetLog.join("\n")}</pre>}
               </div>
-            ) : (
-              <div className="wallet-list">
+            )}
+
+            {wallets.length > 0 && (
+              <div className="wallet-list" style={{ marginTop: 12 }}>
                 {wallets.map((w) => (
                   <button key={w.rdns} className="wallet-row" onClick={() => pickWallet(w)}>
                     {w.icon ? <img src={w.icon} alt="" className="wallet-icon" /> : <span className="wallet-icon ph" />}
@@ -72,22 +95,10 @@ export default function WalletButton() {
                     <span className="pay">you pay gas</span>
                   </button>
                 ))}
-                {showLocal && (
-                  <button className="wallet-row" onClick={pickLocal}>
-                    <span className="wallet-icon ph">🖥️</span>
-                    <span className="name">Local wallet</span>
-                    <span className="pay">relay pays gas</span>
-                  </button>
-                )}
-                {wallets.length === 0 && !showLocal && (
-                  <p className="muted" style={{ textAlign: "center" }}>No Midnight wallet extension detected.</p>
-                )}
               </div>
             )}
 
-            <p className="wallet-net-note">
-              Your wallet must be on the <strong>{NETWORK_ID}</strong> network.
-            </p>
+            <p className="wallet-net-note">Network: <strong>{NETWORK_ID}</strong></p>
           </div>
         </div>
       )}
