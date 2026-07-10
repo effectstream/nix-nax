@@ -6,7 +6,7 @@
 
 import { firstValueFrom } from "rxjs";
 import { unshieldedToken } from "@midnight-ntwrk/ledger-v8";
-import { NETWORK } from "../../../src/sdk/env.ts";
+import { NETWORK, NETWORK_ID, IS_UNDEPLOYED } from "../chain/env.ts";
 import { buildWallet, waitForFunds, registerNightForDust, type WalletBundle } from "../../../src/sdk/wallet.ts";
 import { getGenesisWallet, setGasWallet } from "./local-wallet.ts";
 import { resetArena } from "../chain/arena.ts";
@@ -15,8 +15,7 @@ import { logEvent } from "../game/log-store.ts";
 const SESSION_SEED_KEY = "ttt:session-wallet-seed";
 // The session wallet mints NIGHT from the local genesis seed, which only exists on
 // the `undeployed` dev chain — so it must never be offered on a real network.
-const NETWORK_ID = (import.meta as { env?: Record<string, string> }).env?.VITE_NETWORK_ID ?? "undeployed";
-export const sessionWalletAvailable = NETWORK_ID === "undeployed";
+export const sessionWalletAvailable = IS_UNDEPLOYED;
 const FUND_AMOUNT = 50_000_000_000_000n; // NIGHT moved genesis → session
 const ttl = () => new Date(Date.now() + 30 * 60 * 1000);
 

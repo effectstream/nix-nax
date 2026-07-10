@@ -5,9 +5,10 @@ import { useSyncExternalStore } from "react";
 import { listWallets, connectWallet, hasWalletExtension, type ConnectedAPI, type InitialAPI } from "./connector.ts";
 import { logEvent } from "../game/log-store.ts";
 
-// The dev stack runs the "undeployed" network; testnet/real envs override via
-// VITE_NETWORK_ID. The wallet must be set to this network to connect.
-export const NETWORK_ID = (import.meta as { env?: Record<string, string> }).env?.VITE_NETWORK_ID ?? "undeployed";
+// The dev stack runs the "undeployed" network; real envs override via
+// VITE_NETWORK_ID (see chain/env.ts). The wallet must match it to connect.
+import { NETWORK_ID } from "../chain/env.ts";
+export { NETWORK_ID };
 
 // "wallet" = a connected browser-extension wallet pays its own gas; "local" =
 // the "Session Wallet + Auto Faucet" — a per-browser wallet the faucet funds and

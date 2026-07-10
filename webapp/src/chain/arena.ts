@@ -12,6 +12,7 @@ import { encodeCoinPublicKey, rawTokenType } from "@midnight-ntwrk/compact-runti
 import { firstValueFrom } from "rxjs";
 import { createTicTacToePrivateState, ledger } from "../../../src/contract/index.ts";
 import { buildBrowserProviders } from "./providers.ts";
+import { ARENA_ADDRESS, IS_UNDEPLOYED, NETWORK_ID } from "./env.ts";
 import { makeCompiled, PRIVATE_STATE_ID } from "./compiled.ts";
 import { getGasWallet } from "../wallet/local-wallet.ts";
 import { logEvent } from "../game/log-store.ts";
@@ -40,6 +41,9 @@ export interface ContractState {
   challengeUntil: string;
   hasDeadline: boolean;
   deadline: string;
+  hasRollChallenge: boolean;
+  challengeTurn: number;
+  respondBy: string;
   board: number[];
   tops: number[];
   reserves: Record<string, number>;
@@ -96,12 +100,23 @@ function withLock<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 // ── Attach (lazy + cached) ──────────────────────────────────────────────────
+// Address resolution: a build-time VITE_ARENA_ADDRESS(_<NETWORK>) wins; the
+// /arena.json artifact written by `bun run deploy` is the dev fallback and is
+// refused off-network (its address would belong to a different chain).
 let arenaAddrP: Promise<string> | null = null;
 function arenaAddress(): Promise<string> {
   if (!arenaAddrP) {
-    arenaAddrP = fetch("/arena.json")
-      .then((r) => r.json())
-      .then((j) => j.contractAddress as string);
+    if (ARENA_ADDRESS) {
+      arenaAddrP = Promise.resolve(ARENA_ADDRESS);
+    } else if (!IS_UNDEPLOYED) {
+      return Promise.reject(
+        new Error(`no arena address configured for network "${NETWORK_ID}" — set VITE_ARENA_ADDRESS_${NETWORK_ID.toUpperCase()} in the root .env and rebuild`),
+      );
+    } else {
+      arenaAddrP = fetch("/arena.json")
+        .then((r) => r.json())
+        .then((j) => j.contractAddress as string);
+    }
   }
   return arenaAddrP;
 }
@@ -207,6 +222,9 @@ async function readState(gameId: string): Promise<ContractState> {
     challengeUntil: dyn.challengeUntil.toString(),
     hasDeadline: dyn.hasDeadline,
     deadline: dyn.deadline.toString(),
+    hasRollChallenge: dyn.hasRollChallenge,
+    challengeTurn: Number(dyn.challengeTurn),
+    respondBy: dyn.respondBy.toString(),
     board,
     tops,
     reserves,
@@ -396,6 +414,38 @@ export const api = {
         ...bits4(body.bitsI), fromHex(body.secretI), decodePath(body.pathI),
         ...bits4(body.bitsR), fromHex(body.randomR), decodePath(body.pathR),
       );
+      return { ok: true as const, txId: txIdOf(tx) };
+    }),
+
+  // ── Roll-class dispute (challenge / answer / forfeit) ─────────────────────
+  // The responder demands a committed turn's roll evidence (callerMark auth).
+  challengeRoll: (gameId: string, secret: string, turn: number, respondBy: string) =>
+    withLock(async () => {
+      const { found } = await attachWithSecret(fromHex(secret));
+      const tx = await found.callTx.challengeRoll(gid(gameId), BigInt(turn), BigInt(respondBy));
+      return { ok: true as const, txId: txIdOf(tx) };
+    }),
+
+  // Permissionless: the reveals authenticate themselves under both roots.
+  answerRollChallenge: (body: {
+    gameId: string; slot: number;
+    bitsI: number[]; secretI: string; pathI: WirePath;
+    bitsR: number[]; randomR: string; pathR: WirePath;
+  }) =>
+    withLock(async () => {
+      const { found } = await attach();
+      const tx = await found.callTx.answerRollChallenge(
+        gid(body.gameId), BigInt(body.slot),
+        ...bits4(body.bitsI), fromHex(body.secretI), decodePath(body.pathI),
+        ...bits4(body.bitsR), fromHex(body.randomR), decodePath(body.pathR),
+      );
+      return { ok: true as const, txId: txIdOf(tx) };
+    }),
+
+  claimRollChallenge: (gameId: string) =>
+    withLock(async () => {
+      const { found } = await attach();
+      const tx = await found.callTx.claimRollChallenge(gid(gameId));
       return { ok: true as const, txId: txIdOf(tx) };
     }),
 };

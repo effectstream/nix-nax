@@ -5,7 +5,7 @@
 //   • the active GAS wallet — what on-chain actions pay from. Defaults to genesis
 //     (works single-tab); the faucet (faucet.ts) swaps in a funded session wallet.
 
-import { NETWORK } from "../../../src/sdk/env.ts";
+import { NETWORK, IS_UNDEPLOYED, NETWORK_ID } from "../chain/env.ts";
 import { buildAndFundWallet, type WalletBundle } from "../../../src/sdk/wallet.ts";
 import { logEvent } from "../game/log-store.ts";
 
@@ -14,8 +14,15 @@ export const GENESIS_SEED =
 
 // The genesis ("main") wallet — always available as the faucet's funding source,
 // even after the active gas wallet has been swapped to a session wallet.
+// The well-known genesis seed only holds funds on a local dev chain; building a
+// wallet from it against a real network must never happen.
 let genesisP: Promise<WalletBundle> | null = null;
 export function getGenesisWallet(): Promise<WalletBundle> {
+  if (!IS_UNDEPLOYED) {
+    return Promise.reject(
+      new Error(`the genesis dev wallet is undeployed-only (network is "${NETWORK_ID}") — connect a browser wallet instead`),
+    );
+  }
   if (!genesisP) {
     logEvent("wallet: bringing up the genesis (main) wallet…");
     genesisP = buildAndFundWallet(NETWORK, GENESIS_SEED).then((b) => {

@@ -22,7 +22,8 @@ import type {
   WalletProvider,
 } from "@midnight-ntwrk/midnight-js-types";
 
-import { NETWORK, CONSTANTS } from "../../../src/sdk/env.ts";
+import { CONSTANTS } from "../../../src/sdk/env.ts";
+import { NETWORK, STORAGE_PASSWORD, assertNetworkConfigured } from "./env.ts";
 import type { WalletBundle } from "../../../src/sdk/wallet.ts";
 import { ZK_ASSETS_BASE } from "./compiled.ts";
 
@@ -64,6 +65,7 @@ export function buildBrowserProviders(opts: {
   privateStateStoreName?: string;
   midnightDbName?: string;
 }): MidnightProviders {
+  assertNetworkConfigured();
   const adapter = walletAndMidnight(opts.wallet);
   const store = opts.privateStateStoreName ?? "ttt-arena";
   const zkConfigProvider = new FetchZkConfigProvider(ZK_BASE, fetch.bind(window));
@@ -72,7 +74,7 @@ export function buildBrowserProviders(opts: {
       midnightDbName: opts.midnightDbName ?? "ttt-web-db",
       privateStateStoreName: store,
       signingKeyStoreName: `${store}-signing-keys`,
-      privateStoragePasswordProvider: async () => CONSTANTS.STORAGE_PASSWORD,
+      privateStoragePasswordProvider: async () => STORAGE_PASSWORD,
       accountId: Buffer.from(opts.wallet.zswapSecretKeys.coinPublicKey).toString("hex"),
     } as any),
     publicDataProvider: indexerPublicDataProvider(NETWORK.indexer, NETWORK.indexerWS),

@@ -23,10 +23,10 @@ const RUNTIME_PKGS = [
 
 // Serve the compiled contract assets (keys/zkir, ~77 MB) straight from
 // src/contract/managed so the browser's CompiledContract (withCompiledFileAssets)
-// and FetchZkConfigProvider can read them at /contract/compiled/gobblet-arena/* —
+// and FetchZkConfigProvider can read them at /contract/compiled/nixnax-arena/* —
 // no 77 MB copy into public/.
 const MANAGED_DIR = fileURLToPath(new URL("../src/contract/managed", import.meta.url));
-const ASSET_PREFIX = "/contract/compiled/gobblet-arena/";
+const ASSET_PREFIX = "/contract/compiled/nixnax-arena/";
 function contractAssets(): Plugin {
   return {
     name: "serve-contract-assets",
@@ -49,6 +49,9 @@ function contractAssets(): Plugin {
 }
 
 export default defineConfig({
+  // Read .env files from the repo root, so one shared .env holds both the
+  // server-side MIDNIGHT_* vars and the browser VITE_* vars (see .env.example).
+  envDir: "..",
   plugins: [
     react(),
     wasm(),
@@ -92,6 +95,13 @@ export default defineConfig({
       // the off-chain message relay is proxied now.
       "/relay": { target: "ws://localhost:4310", ws: true, changeOrigin: true },
     },
+  },
+  build: {
+    // The chain layer needs top-level await (WASM runtime init); vite's default
+    // es2020 target can't express it and the TLA plugin's lowering chokes on it.
+    target: "esnext",
+    // ledger/runtime WASM chunks are legitimately large; silence the 500k nag.
+    chunkSizeWarningLimit: 4096,
   },
   optimizeDeps: {
     // Runtime/value-type packages stay raw → single instance (see above).
