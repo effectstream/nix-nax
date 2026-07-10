@@ -8,10 +8,28 @@
 //   class 1 (place):  bits [0,0,0,1]  -> joint v = 8  (>= 3)
 // so classOfRoll(jointRollValue(...)) == schedule[t] for every slot/mover.
 
-import { buildTokenTree, secretFor, type TokenTree } from "../../src/sdk/crypto/token-tree.ts";
-import { buildIndexTree, SLOTS_PER_TURN, type IndexTree } from "../../src/sdk/crypto/index-tree.ts";
+import {
+  buildTokenTree,
+  secretFor,
+  actionOffset,
+  actionFromOffset,
+  ACTION_BLOCK,
+  ACTIONS_PER_TURN,
+  TOKEN_TREE_DEPTH,
+  TOKEN_TREE_SIZE,
+  type TokenTree,
+} from "../../src/sdk/crypto/token-tree.ts";
+import { buildIndexTree, SLOTS_PER_TURN, INDEX_TREE_DEPTH, INDEX_TREE_SIZE, type IndexTree } from "../../src/sdk/crypto/index-tree.ts";
 import { buildRandomTree, type RandomTree } from "../../src/sdk/crypto/random-tree.ts";
-import { computePlayerId } from "../../src/sdk/crypto/persistent-hash.ts";
+import {
+  computePlayerId,
+  computeIndexLeaf,
+  computeTokenLeaf,
+  buildMerkleLevels,
+  pathFromLevels,
+  randomBytes32,
+  type MerklePath as HashMerklePath,
+} from "../../src/sdk/crypto/persistent-hash.ts";
 import { MAX_TURNS, type Kind } from "../../src/sdk/game/rules.ts";
 import type { Intent, RandomReveal, MerklePath } from "../../src/sdk/crypto/signed-move.ts";
 
@@ -48,6 +66,12 @@ export const SCHEDULE_B = mkSchedule([1, 2, 10]);
 export const SCHEDULE_C = mkSchedule([]);
 // D: a single X-side removal window at t8 (even) — for removal-reveal wins.
 export const SCHEDULE_D = mkSchedule([8]);
+// E: every ODD turn is a removal (O removes on its turns, X places on evens) —
+// the board never accumulates toward a line, so a full 128-turn game ends in a
+// draw. Used to exercise the committedTurns==128 / drawNow / draw-mint paths.
+export const SCHEDULE_E = mkSchedule(
+  (() => { const odds: number[] = []; for (let t = 1; t < MAX_TURNS; t += 2) odds.push(t); return odds; })(),
+);
 
 // ── Players ─────────────────────────────────────────────────────────────────
 
@@ -108,6 +132,18 @@ export const playersA = (): TestPair => buildPlayers(SCHEDULE_A, "A", 0xaaaa01n)
 export const playersB = (): TestPair => buildPlayers(SCHEDULE_B, "B", 0xbbbb02n);
 export const playersC = (): TestPair => buildPlayers(SCHEDULE_C, "C", 0xcccc03n);
 export const playersD = (): TestPair => buildPlayers(SCHEDULE_D, "D", 0xdddd04n);
+export const playersE = (): TestPair => buildPlayers(SCHEDULE_E, "E", 0xeeee05n);
+
+// A pair with a RANDOM gameId (fresh trees each call, uncached). The e2e suite
+// reuses one persisted arena across runs, and gameIds can never be reused on
+// it — deterministic fixture ids would collide with games from prior runs.
+export function freshPlayers(schedule: number[]): TestPair {
+  const seedBytes = new Uint8Array(8);
+  globalThis.crypto.getRandomValues(seedBytes);
+  let seed = 0n;
+  for (const b of seedBytes) seed = (seed << 8n) | BigInt(b);
+  return buildPlayers(schedule, `fresh-${seed.toString(16)}`, seed);
+}
 
 export const hexOf = (b: Uint8Array): string =>
   Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("");
@@ -157,10 +193,15 @@ export interface ScriptMove {
 }
 
 export const ZERO_BYTES32 = new Uint8Array(32);
-export const ZERO_PATH_14: MerklePath = {
+const zeroPath = (depth: number): MerklePath => ({
   leaf: ZERO_BYTES32,
-  path: Array.from({ length: 14 }, () => ({ sibling: { field: 0n }, goes_left: false })),
-};
+  path: Array.from({ length: depth }, () => ({ sibling: { field: 0n }, goes_left: false })),
+});
+// Structurally-valid dummy paths (right depth, garbage contents) — for tests
+// whose range/format asserts fire BEFORE the Merkle-path verification.
+export const ZERO_PATH_14: MerklePath = zeroPath(14); // token tree
+export const ZERO_PATH_7: MerklePath = zeroPath(7);   // index tree
+export const ZERO_PATH_11: MerklePath = zeroPath(11); // random tree
 
 const CHUNK = 8; // must match the contract's settle vector size
 
@@ -197,4 +238,101 @@ export function packChunk(pair: TestPair, baseTurn: number, moves: ScriptMove[])
     paths[i] = mover.token.pathFor(turn, m.kind, m.cell, m.size);
   }
   return { nMoves: BigInt(moves.length), parities, kinds, cells, sizes, secrets, paths };
+}
+
+// ── Adversarial index tree (equivocation composition test) ──────────────────
+// A malicious player builds an I-tree that commits a SECOND, different leaf for
+// `evilTurn` at some OTHER position (`stashAt`). The honest ceremony leaf lives
+// at index==evilTurn; the alternate lives at index==stashAt but is ALSO a valid
+// leaf for `evilTurn` (its preimage's turn field is evilTurn), so both verify
+// under the same root. This models a cheater who, when challenged, could answer
+// with the alternate bits — and thereby hands the opponent two valid I-leaves
+// for one turn, which proveIndexEquivocation slashes.
+export interface MaliciousIndex {
+  root: { field: bigint };
+  // The honest leaf at index==turn (what the ceremony used).
+  honest: (turn: number) => { slot: number; bits: number[]; secret: Uint8Array; path: MerklePath };
+  // The stashed alternate leaf that is ALSO valid for `evilTurn`.
+  alt: { slot: number; bits: number[]; secret: Uint8Array; path: MerklePath };
+  evilTurn: number;
+}
+
+export function buildMaliciousIndexTree(
+  gameId: Uint8Array,
+  evilTurn: number,
+  stashAt: number,
+  honestSlots: number[],
+  honestBits: number[][],
+  altSlot: number,
+  altBits: number[],
+): MaliciousIndex {
+  if (stashAt === evilTurn) throw new Error("stash must be a different position");
+  const secrets: Uint8Array[] = [];
+  const leafBytes: Uint8Array[] = new Array(INDEX_TREE_SIZE);
+  const altSecret = randomBytes32();
+  for (let t = 0; t < INDEX_TREE_SIZE; t++) {
+    secrets[t] = randomBytes32();
+    if (t === stashAt) {
+      // Place a leaf whose PREIMAGE turn is evilTurn (not t) → a second valid
+      // leaf for evilTurn, sitting at position stashAt.
+      leafBytes[t] = computeIndexLeaf(gameId, evilTurn, altSlot, altBits, altSecret);
+    } else {
+      leafBytes[t] = computeIndexLeaf(gameId, t, honestSlots[t], honestBits[t], secrets[t]);
+    }
+  }
+  const levels = buildMerkleLevels(leafBytes, INDEX_TREE_DEPTH);
+  const root = { field: levels[INDEX_TREE_DEPTH][0] };
+  return {
+    root,
+    honest: (turn: number) => ({
+      slot: honestSlots[turn], bits: honestBits[turn], secret: secrets[turn],
+      path: pathFromLevels(levels, leafBytes, turn, INDEX_TREE_DEPTH) as MerklePath,
+    }),
+    alt: {
+      slot: altSlot, bits: altBits, secret: altSecret,
+      path: pathFromLevels(levels, leafBytes, stashAt, INDEX_TREE_DEPTH) as MerklePath,
+    },
+    evilTurn,
+  };
+}
+
+// ── Adversarial token tree (non-canonical action tokens) ────────────────────
+// The honest T-tree only commits canonical actions (remove/pass ignore
+// size/cell). A cheater could instead build a tree committing a token for a
+// NON-canonical action — e.g. a remove with size≠0 or a pass with cell≠0 — to
+// probe settle's canonical-form guards. This helper builds an otherwise-normal
+// tree with one such token grafted in, and returns a valid path + secret for
+// it (so tokenIsUnder passes and the canonical-form assert is what fires).
+export interface MaliciousToken {
+  root: { field: bigint };
+  secret: Uint8Array;
+  path: MerklePath;
+}
+
+export function buildMaliciousTokenTree(
+  gameId: Uint8Array,
+  evil: { turn: number; kind: number; cell: number; size: number },
+): MaliciousToken {
+  const tree = buildTokenTree(gameId); // full honest canonical tree
+  // Recompute leaf bytes exactly as buildTokenTree does, then overwrite the
+  // evil action's canonical slot with a leaf bound to the NON-canonical fields.
+  const leafBytes: Uint8Array[] = new Array(TOKEN_TREE_SIZE);
+  const zero = new Uint8Array(32);
+  for (let i = 0; i < TOKEN_TREE_SIZE; i++) leafBytes[i] = zero;
+  for (let t = 0; t < MAX_TURNS; t++) {
+    for (let off = 0; off < ACTIONS_PER_TURN; off++) {
+      const { kind, cell, size } = actionFromOffset(off);
+      leafBytes[t * ACTION_BLOCK + off] = computeTokenLeaf(gameId, t, kind, cell, size, tree.secrets[t][off]);
+    }
+  }
+  const evilOff = actionOffset(evil.kind, evil.cell, evil.size); // remove/pass → canonical slot
+  const evilSecret = randomBytes32();
+  const evilIdx = evil.turn * ACTION_BLOCK + evilOff;
+  leafBytes[evilIdx] = computeTokenLeaf(gameId, evil.turn, evil.kind, evil.cell, evil.size, evilSecret);
+  const levels = buildMerkleLevels(leafBytes, TOKEN_TREE_DEPTH);
+  return {
+    root: { field: levels[TOKEN_TREE_DEPTH][0] },
+    secret: evilSecret,
+    path: pathFromLevels(levels, leafBytes, evilIdx, TOKEN_TREE_DEPTH) as MerklePath,
+  };
 }
