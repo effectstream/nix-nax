@@ -1,6 +1,6 @@
 // Thin TS wrappers around `@midnight-ntwrk/compact-runtime` hashing primitives.
 //
-// Everything here mirrors the IN-CIRCUIT algorithm of GobbletChannel.compact
+// Everything here mirrors the IN-CIRCUIT algorithm of NixNaxArena.compact
 // and the standard library's `merkleTreePathRoot`. The tree modules compose
 // these to build / verify the three per-player commitment trees:
 //   T-tree — one-time action tokens (turn, kind, cell, size)
@@ -216,10 +216,10 @@ export function pad6(s: string): Uint8Array {
   return out;
 }
 
-export const DOMAIN_PLAYER_ID = pad32("gob:id:");
-export const DOMAIN_TOKEN_OTK = pad32("gob:otk:");
-export const DOMAIN_INDEX = pad32("gob:idx:");
-export const DOMAIN_RANDOM = pad32("gob:rnd:");
+export const DOMAIN_PLAYER_ID = pad32("nixnax:id:");
+export const DOMAIN_TOKEN_OTK = pad32("nixnax:otk:");
+export const DOMAIN_INDEX = pad32("nixnax:idx:");
+export const DOMAIN_RANDOM = pad32("nixnax:rnd:");
 export const DOMAIN_STDLIB_LEAF_HASH = pad6("mdn:lh");
 
 // ── High-level hashes used by both sides (TS ↔ in-circuit must match) ──────
@@ -231,7 +231,7 @@ function assertBits4(bits: readonly number[]): void {
 }
 
 // playerId(gameId, secret) = persistentHash<Vector<3, Bytes<32>>>(
-//   [pad(32, "gob:id:"), gameId, secret]) — identity is scoped per game.
+//   [pad(32, "nixnax:id:"), gameId, secret]) — identity is scoped per game.
 export function computePlayerId(gameId: Uint8Array, secret: Uint8Array): Uint8Array {
   if (gameId.length !== 32) throw new Error("gameId must be 32 bytes");
   if (secret.length !== 32) throw new Error("secret must be 32 bytes");

@@ -5,13 +5,13 @@
   "type": "module",
   "description": "Tic-tac-toe state channel on Midnight: off-chain play, on-chain settlement with equivocation fraud proofs and timeout forfeit.",
   "scripts": {
-    "compact": "compact compile +0.30.0 src/contract/GobbletArena.compact src/contract/managed/ && compact compile +0.30.0 src/contract/GobbletArenaStub.compact src/contract/managed-stub/",
-    "compact:check": "node compile.mjs src/contract/GobbletArena.compact",
+    "compact": "compact compile +0.30.0 src/contract/NixNaxArena.compact src/contract/managed/ && compact compile +0.30.0 src/contract/NixNaxArenaStub.compact src/contract/managed-stub/",
+    "compact:check": "node compile.mjs src/contract/NixNaxArena.compact",
     "stack:up": "bun run scripts/stack-up.ts",
     "stack:down": "bun run scripts/stack-down.ts",
     "deploy": "bun run scripts/deploy.ts",
     "test": "vitest run test/contract.sim.test.ts test/crypto.test.ts",
-    "test:e2e": "vitest run test/e2e --testTimeout=600000",
+    "test:e2e": "vitest run test/e2e --testTimeout=600000 --no-file-parallelism --pool=forks --poolOptions.forks.singleFork",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

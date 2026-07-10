@@ -2,7 +2,7 @@
 // (turn, slot).
 //
 // Layout — 128 turns × 16 slots = 2,048 leaves, depth-11 tree. Leaf index =
-// turn * 16 + slot. Leaf preimage: {domainSep "gob:rnd:", turn, slot, bit,
+// turn * 16 + slot. Leaf preimage: {domainSep "nixnax:rnd:", turn, slot, bit,
 // random} where
 //   bit ∈ {0,1} — the responder's contribution to the XOR parity coin;
 //   random — 32 bytes, displayed in the UI as "the turn's random value"
@@ -11,7 +11,7 @@
 // On turn t the mover reveals their I-leaf (slot s, bitI); the responder
 // reveals this tree's leaf at (t, s). parity(t) = bitI XOR bitR.
 //
-// In-circuit verification: GobbletChannel.compact `randomIsUnder` (depth 11).
+// In-circuit verification: NixNaxArena.compact `randomIsUnder` (depth 11).
 
 import {
   computeRandomLeaf,

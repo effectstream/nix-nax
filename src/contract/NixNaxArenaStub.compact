@@ -1,11 +1,11 @@
-// GobbletArenaStub.compact
-// DEPLOY-ONLY twin of GobbletArena.compact: identical ledger declarations
+// NixNaxArenaStub.compact
+// DEPLOY-ONLY twin of NixNaxArena.compact: identical ledger declarations
 // (same order — state layout must match) with ZERO exported circuits and an
 // empty constructor. The arena deploys ONCE per chain via this stub (small
 // tx), then each circuit's verifier key is inserted in its own maintenance
-// transaction. See GobbletArena.compact / deploy.ts.
+// transaction. See NixNaxArena.compact / deploy.ts.
 //
-// KEEP IN SYNC with GobbletArena.compact's ledger declarations.
+// KEEP IN SYNC with NixNaxArena.compact's ledger declarations.
 
 pragma language_version >= 0.16.0;
 
@@ -34,6 +34,9 @@ struct GameDyn {
   hasDeadline: Boolean,
   challengeUntil: Uint<64>,
   hasChallenge: Boolean,
+  challengeTurn: Uint<16>,
+  hasRollChallenge: Boolean,
+  respondBy: Uint<64>,
 }
 
 export ledger gameKeys: Map<Bytes<32>, GameKeys>;
@@ -42,3 +45,12 @@ export ledger boards: Map<Bytes<32>, Map<Uint<16>, Uint<8>>>;
 export ledger tops: Map<Bytes<32>, Map<Uint<16>, Uint<8>>>;
 export ledger reserves: Map<Bytes<32>, Map<Uint<16>, Uint<8>>>;
 export ledger actionLogs: Map<Bytes<32>, Map<Uint<16>, Uint<16>>>;
+export ledger rollAnswered: Map<Bytes<32>, Map<Uint<16>, Boolean>>;
+export sealed ledger minWindowSecs: Uint<64>;
+
+// The stub is what is actually deployed (then circuits are attached), so its
+// constructor sets the shared config the real circuits read. MUST match
+// NixNaxArena.compact's constructor.
+constructor(minWindow: Uint<64>) {
+  minWindowSecs = disclose(minWindow);
+}

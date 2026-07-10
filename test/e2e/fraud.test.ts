@@ -3,13 +3,14 @@
 
 import { describe, test, expect } from "vitest";
 import { Status, Winner } from "../../src/contract/managed/contract/index.js";
-import { playersB } from "../helpers/fixtures.ts";
+import { freshPlayers, SCHEDULE_B } from "../helpers/fixtures.ts";
 import { openGame } from "./driver.ts";
+import { sleep } from "./helpers.ts";
 import { KIND_PLACE } from "../../src/sdk/game/rules.ts";
 
 describe("e2e: equivocation fraud proof", () => {
   test("two X tokens for turn 0 -> proveEquivocationByX -> O wins", async () => {
-    const pair = playersB();
+    const pair = freshPlayers(SCHEDULE_B);
     const g = await openGame(pair);
     console.log("Game opened on arena", g.contractAddress);
 
@@ -20,8 +21,22 @@ describe("e2e: equivocation fraud proof", () => {
     );
     console.log("proveEquivocationByX txId:", txId);
 
-    const d = await g.readDyn();
+    // M1: a fraud proof decides the game but leaves it inProgress so the winner
+    // can still finalise + mint. No challenge window applies to a proven result.
+    let d = await g.readDyn();
     expect(d.winner).toBe(Winner.o);
+    expect(d.status).toBe(Status.inProgress);
+
+    const winsBefore = await g.readWinBalance();
+    const claimTx = await g.claimResult("o"); // O is the winner here
+    console.log("claimResult(o) txId:", claimTx);
+
+    d = await g.readDyn();
     expect(d.status).toBe(Status.settled);
+    expect(d.winner).toBe(Winner.o);
+
+    await sleep(10_000);
+    const winsAfter = await g.readWinBalance();
+    expect(winsAfter).toBe(winsBefore + 1n); // fraud-path winner minted (M1)
   }, 600_000);
 });

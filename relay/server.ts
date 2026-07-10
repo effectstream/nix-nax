@@ -9,6 +9,12 @@
 //   GET /api/health                                        (liveness only)
 
 const PORT = Number(process.env.RELAY_PORT ?? 4310);
+// Abuse caps — a full game is ~128 turns × 3 ceremony messages, so the
+// defaults leave generous headroom while keeping a hostile client from
+// growing memory without bound.
+const MAX_ROOMS = Number(process.env.RELAY_MAX_ROOMS ?? 1000);
+const MAX_HISTORY = Number(process.env.RELAY_MAX_HISTORY ?? 1500);
+const MAX_MESSAGE_BYTES = Number(process.env.RELAY_MAX_MESSAGE_BYTES ?? 256 * 1024);
 const log = (...args: unknown[]) => console.log(new Date().toISOString().slice(11, 19), ...args);
 
 // ── Rooms (WS broadcast between two players sharing a gameId). ─────────────
@@ -22,9 +28,13 @@ interface Room {
   history: { type: "intent" | "random" | "move"; payload: unknown }[];
 }
 const rooms = new Map<string, Room>();
-function getRoom(gameId: string): Room {
+function getRoom(gameId: string): Room | null {
   let r = rooms.get(gameId);
   if (!r) {
+    if (rooms.size >= MAX_ROOMS) {
+      log("room limit reached — rejecting", gameId.slice(0, 10));
+      return null;
+    }
     r = { clients: new Map(), history: [] };
     rooms.set(gameId, r);
   }
@@ -55,13 +65,19 @@ const json = (data: unknown, status = 200): Response =>
 const server = Bun.serve({
   port: PORT,
   websocket: {
+    maxPayloadLength: MAX_MESSAGE_BYTES,
     open(ws) {
       (ws as any).data = { addr: null, role: null };
     },
     message(ws, message) {
+      const raw = String(message);
+      if (raw.length > MAX_MESSAGE_BYTES) {
+        log("oversized message dropped", raw.length);
+        return;
+      }
       let msg: any;
       try {
-        msg = JSON.parse(String(message));
+        msg = JSON.parse(raw);
       } catch {
         return;
       }
@@ -69,6 +85,10 @@ const server = Bun.serve({
         case "join": {
           if (typeof msg.addr !== "string" || (msg.role !== "x" && msg.role !== "o")) return;
           const room = getRoom(msg.addr);
+          if (!room) {
+            try { ws.close(1013, "relay full"); } catch {}
+            return;
+          }
           if (room.clients.has(msg.role)) {
             try { room.clients.get(msg.role)!.ws.close(); } catch {}
           }
@@ -87,6 +107,11 @@ const server = Bun.serve({
           const { addr, role } = (ws as any).data;
           if (!addr || !role) return;
           const room = getRoom(addr);
+          if (!room) return;
+          if (room.history.length >= MAX_HISTORY) {
+            log("history cap hit — dropping message", addr.slice(0, 10));
+            return;
+          }
           room.history.push({ type: msg.type, payload: msg.payload });
           log(`ws ${msg.type}`, addr.slice(0, 10), "turn=", msg.payload?.turn, "from=", role);
           broadcast(room, role, { type: msg.type, addr, payload: msg.payload });
@@ -96,6 +121,7 @@ const server = Bun.serve({
           const { addr } = (ws as any).data;
           if (!addr) return;
           const room = getRoom(addr);
+          if (!room) return;
           broadcast(room, null, { type: "event", addr, kind: msg.kind });
           break;
         }

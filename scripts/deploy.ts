@@ -1,6 +1,6 @@
 // One-time arena deployment for the serverless (client-side) webapp.
 //
-// Deploys GobbletArena once (or reuses the persisted deployment) using the
+// Deploys NixNaxArena once (or reuses the persisted deployment) using the
 // genesis wallet, then writes the contract address to webapp/public/arena.json
 // so the browser dApp can attach by address — no relay needed.
 //
@@ -36,6 +36,10 @@ await writeFile(
   JSON.stringify({ contractAddress: arena.contractAddress, networkId: NETWORK.networkId }, null, 2) + "\n",
 );
 console.log(`deploy: wrote ${ARENA_JSON}`);
+console.log(
+  `deploy: for a production webapp build, record this in the root .env:\n` +
+  `  VITE_ARENA_ADDRESS_${String(NETWORK.networkId).toUpperCase()}=${arena.contractAddress}`,
+);
 
 // Wallet/providers hold open indexer subscriptions + LevelDB; exit explicitly.
 process.exit(0);

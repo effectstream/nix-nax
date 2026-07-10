@@ -1,0 +1,40 @@
+# Nix-Nax message relay — systemd unit.
+#
+#   sudo cp deploy/nixnax-relay.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now nixnax-relay
+#
+# Assumes the repo at /srv/nixnax (bun installed for the `nixnax` user, e.g. at
+# /home/nixnax/.bun/bin/bun — adjust ExecStart) and config in /srv/nixnax/.env
+# (RELAY_PORT, RELAY_MAX_ROOMS, RELAY_MAX_HISTORY, RELAY_MAX_MESSAGE_BYTES).
+# The relay holds no keys and no chain access — it only forwards the off-chain
+# ceremony messages — so it needs no secrets.
+
+[Unit]
+Description=Nix-Nax off-chain message relay (WebSocket switchboard)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nixnax
+Group=nixnax
+WorkingDirectory=/srv/nixnax/relay
+EnvironmentFile=-/srv/nixnax/.env
+ExecStart=/home/nixnax/.bun/bin/bun run server.ts
+Restart=on-failure
+RestartSec=2
+
+# Hardening — the relay needs nothing but a listening socket.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

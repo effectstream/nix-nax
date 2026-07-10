@@ -9,7 +9,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { findDeployedContract } from "@midnight-ntwrk/midnight-js-contracts";
-import { NETWORK } from "../../../src/sdk/env.ts";
+import { NETWORK } from "../chain/env.ts";
 import { buildAndFundWallet, waitForFunds } from "../../../src/sdk/wallet.ts";
 import { createTicTacToePrivateState } from "../../../src/contract/index.ts";
 import { generatePlayerKeys } from "../game/player-session.ts";

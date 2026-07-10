@@ -10,7 +10,7 @@
 //
 // Leaf preimage binds the SEMANTICS (turn, kind, cell, size) — the position
 // in the tree is just a client convention, exactly like the tic-tac-toe
-// version. In-circuit verification: GobbletChannel.compact `tokenIsUnder`.
+// version. In-circuit verification: NixNaxArena.compact `tokenIsUnder`.
 
 import {
   computeTokenLeaf,

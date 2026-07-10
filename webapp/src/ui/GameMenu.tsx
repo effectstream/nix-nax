@@ -53,6 +53,7 @@ export default function GameMenu({ open, onClose, session, chain, wsStatus, acti
   const records = session.turnRecords();
   const a = actions;
   const advanced = a.canProveT || a.canProveI || a.canProveR || a.canProveP;
+  const dispute = a.canChallengeRoll || a.canAnswerRoll || a.canClaimRoll;
 
   return (
     <>
@@ -131,6 +132,17 @@ export default function GameMenu({ open, onClose, session, chain, wsStatus, acti
               {a.canProveI && <button className="btn-warn btn-block" disabled={a.busy !== null} onClick={a.proveI}>{a.busy === "Prove slot fork" ? "Proving…" : "Prove fraud — slot fork"}</button>}
               {a.canProveR && <button className="btn-warn btn-block" disabled={a.busy !== null} onClick={a.proveR}>{a.busy === "Prove random fork" ? "Proving…" : "Prove fraud — random fork"}</button>}
               {a.canProveP && <button className="btn-warn btn-block" disabled={a.busy !== null} onClick={a.proveP}>{a.busy === "Prove wrong parity" ? "Proving…" : "Prove fraud — roll-class lie"}</button>}
+            </div>
+          </>
+        )}
+
+        {dispute && (
+          <>
+            <div className="section-title">Roll-class dispute</div>
+            <div className="col">
+              {a.canChallengeRoll && <button className="btn-warn btn-block" disabled={a.busy !== null} onClick={a.challengeRoll}>{a.busy === "Challenge roll" ? "Challenging…" : "Challenge roll — demand evidence for an unseen turn"}</button>}
+              {a.canAnswerRoll && <button className="btn-o btn-block" disabled={a.busy !== null} onClick={a.answerRoll}>{a.busy === "Answer roll challenge" ? "Answering…" : "Answer roll challenge — post the ceremony reveals"}</button>}
+              {a.canClaimRoll && <button className="btn-warn btn-block" disabled={a.busy !== null} onClick={a.claimRoll}>{a.busy === "Claim roll forfeit" ? "Claiming…" : "Claim forfeit — challenge went unanswered"}</button>}
             </div>
           </>
         )}

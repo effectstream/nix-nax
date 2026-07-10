@@ -21,6 +21,17 @@ export const MAX_TURNS = 128;
 // within the node's per-block weight budget (16 exhausted it at deploy).
 export const SETTLE_CHUNK = 8;
 
+// Minimum on-chain challenge / timeout windows, in the chain's block-time unit
+// (seconds). Enforced in-circuit by settle (challengeUntil) and startTimeout
+// (deadline) — a caller-chosen window below these is rejected, so a settler
+// can't finalise before the opponent can challenge, and a waiter can't arm an
+// instant forfeit. MUST match the literals in NixNaxArena.compact.
+export const MIN_CHALLENGE_SECS = 600;
+export const MIN_TIMEOUT_SECS = 600;
+// Minimum window a roll-class challenge leaves the mover to answer
+// (challengeRoll's respondBy floor).
+export const MIN_RESPONSE_SECS = 600;
+
 export const KIND_PLACE = 1;
 export const KIND_REMOVE = 2;
 export const KIND_PASS = 3;

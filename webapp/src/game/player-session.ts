@@ -561,6 +561,32 @@ export class PlayerSession {
     return null;
   }
 
+  // A committed OPPONENT turn whose ceremony this session never saw — the
+  // unilateral-settle case the roll-class dispute (challengeRoll) exists for.
+  // detectWrongParity can't act there (no local evidence to judge with); this
+  // returns the first such turn so the UI can demand the evidence on-chain.
+  detectUnseenRoll(chainActionLog: { turn: number; packed: number }[]): number | null {
+    for (const entry of chainActionLog) {
+      const t = entry.turn;
+      if (t === 0) continue;
+      const moverMark = t % 2 === 0 ? 1 : 2;
+      if (moverMark === this.myMark) continue; // only the responder may challenge
+      if (this.parityForTurn(t) === null) return t;
+    }
+    return null;
+  }
+
+  // Evidence for answering a roll-class challenge on MY turn t: my I-reveal +
+  // the opponent's R-reveal (same payload shape as a wrong-parity proof).
+  // Null if this session never completed the ceremony for t — in which case
+  // the challenge is unanswerable by construction.
+  rollAnswerFor(t: number): WrongParityProof | null {
+    const it = this.intents[t];
+    const rv = this.reveals[t];
+    if (!it || !rv) return null;
+    return buildWrongParityProof(it, rv);
+  }
+
   // Wrong parity: compare the on-chain actionLog's claimed parities against
   // the locally known committed bits. Returns the first provable lie.
   detectWrongParity(chainActionLog: { turn: number; packed: number }[]): WrongParityProof | null {

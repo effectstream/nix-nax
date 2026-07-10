@@ -6,6 +6,7 @@
 import { useState } from "react";
 import { api, type ContractState } from "../chain/arena.ts";
 import { encodePath } from "../../../src/sdk/game/messaging.ts";
+import { MIN_CHALLENGE_SECS, MIN_TIMEOUT_SECS, MIN_RESPONSE_SECS } from "../../../src/sdk/game/rules.ts";
 import { logEvent } from "../game/log-store.ts";
 import type { PlayerSession } from "../game/player-session.ts";
 
@@ -23,6 +24,9 @@ export interface ChainActions {
   canProveI: boolean;
   canProveR: boolean;
   canProveP: boolean;
+  canChallengeRoll: boolean;
+  canAnswerRoll: boolean;
+  canClaimRoll: boolean;
   settle: () => void;
   claimResult: () => void;
   startTimeout: () => void;
@@ -31,6 +35,9 @@ export interface ChainActions {
   proveI: () => void;
   proveR: () => void;
   proveP: () => void;
+  challengeRoll: () => void;
+  answerRoll: () => void;
+  claimRoll: () => void;
 }
 
 export function useChainActions(
@@ -57,8 +64,22 @@ export function useChainActions(
   const myMark = session.role === "x" ? 1 : 2;
   const decidedWinner = chain?.winner === 1 || chain?.winner === 2;
   const iWon = decidedWinner && chain?.winner === myMark;
+  // Roll-class dispute state (see challengeRoll/answerRoll/claimRoll below).
+  const rollPending = !!chain?.hasRollChallenge;
+  const unseenTurn = chain && !settled ? session.detectUnseenRoll(chain.actionLog ?? []) : null;
+  const answerPayload =
+    rollPending && (chain!.challengeTurn % 2 === 0 ? 1 : 2) === myMark
+      ? session.rollAnswerFor(chain!.challengeTurn)
+      : null;
+  const respondExpired =
+    rollPending && Number(chain!.respondBy) <= Math.floor(Date.now() / 1000);
+  // Finalisable once decided (win or draw) with no window pending: optimistic
+  // wins wait out the challenge window; fraud/timeout wins carry no window and
+  // finalise immediately. A pending roll dispute blocks it either way.
+  const windowClear = !challengeOpen || challengeExpired;
   const canClaimResult =
-    !settled && !halfOpen && challengeExpired && (!decidedWinner || iWon);
+    !settled && !halfOpen && chainDecided && windowClear && !rollPending &&
+    (!decidedWinner || iWon);
   const deadlineExpired =
     !!chain?.hasDeadline && Number(chain.deadline) <= Math.floor(Date.now() / 1000);
   const canClaimTimeout = !settled && !halfOpen && deadlineExpired;
@@ -75,6 +96,9 @@ export function useChainActions(
   const canProveI = !settled && !halfOpen && !!fraudI;
   const canProveR = !settled && !halfOpen && !!fraudR;
   const canProveP = !settled && !halfOpen && !!fraudP;
+  const canChallengeRoll = !settled && !halfOpen && !rollPending && unseenTurn !== null;
+  const canAnswerRoll = !settled && !halfOpen && rollPending && !!answerPayload;
+  const canClaimRoll = !settled && !halfOpen && rollPending && respondExpired;
 
   const wrap = (label: string, fn: () => Promise<unknown>) => () => {
     setError(null);
@@ -99,10 +123,13 @@ export function useChainActions(
     busy, error, settled,
     canSettle, canClaimResult, canStartTimeout, canClaimTimeout,
     canProveT, canProveI, canProveR, canProveP,
+    canChallengeRoll, canAnswerRoll, canClaimRoll,
 
     settle: wrap("Submit", async () => {
       const from = chain?.committedTurns ?? 0;
-      const challengeWindowSec = 12;
+      // Must exceed the contract's MIN_CHALLENGE_SECS floor; add a buffer for
+      // client-clock vs block-time skew so honest settles aren't rejected.
+      const challengeWindowSec = MIN_CHALLENGE_SECS + 120;
       const untilTime = Math.floor(Date.now() / 1000) + challengeWindowSec;
       const chunks = session.settleChunkPayloads(from, untilTime);
       if (chunks.length === 0) { logEvent("settle: nothing to extend"); return; }
@@ -119,7 +146,7 @@ export function useChainActions(
     }),
 
     startTimeout: wrap("Start timeout", async () => {
-      const untilTime = String(Math.floor(Date.now() / 1000) + 30);
+      const untilTime = String(Math.floor(Date.now() / 1000) + MIN_TIMEOUT_SECS + 120);
       const r = await api.startTimeout(session.gameId, hex(session.keys.secret), untilTime);
       logEvent(`start-timeout: tx ${r.txId}`);
     }),
@@ -167,6 +194,32 @@ export function useChainActions(
         bitsR: p.bitsR, randomR: hex(p.randomR), pathR: encodePath(p.pathR),
       });
       logEvent(`prove-wrong-parity: tx ${r.txId}`);
+    }),
+
+    // Demand the roll evidence for a committed opponent turn this client never
+    // saw the ceremony for (unilateral settle). The mover must answer on-chain
+    // before respondBy or forfeit via claimRoll.
+    challengeRoll: wrap("Challenge roll", async () => {
+      const respondBy = String(Math.floor(Date.now() / 1000) + MIN_RESPONSE_SECS + 120);
+      const r = await api.challengeRoll(session.gameId, hex(session.keys.secret), unseenTurn!, respondBy);
+      logEvent(`challenge-roll: turn ${unseenTurn} — tx ${r.txId}`);
+    }),
+
+    // Answer a pending challenge on my own turn with the ceremony reveals.
+    answerRoll: wrap("Answer roll challenge", async () => {
+      const p = answerPayload!;
+      const r = await api.answerRollChallenge({
+        gameId: session.gameId, slot: p.slot,
+        bitsI: p.bitsI, secretI: hex(p.secretI), pathI: encodePath(p.pathI),
+        bitsR: p.bitsR, randomR: hex(p.randomR), pathR: encodePath(p.pathR),
+      });
+      logEvent(`answer-roll-challenge: turn ${chain!.challengeTurn} — tx ${r.txId}`);
+    }),
+
+    // The challenge went unanswered past respondBy: claim the forfeit.
+    claimRoll: wrap("Claim roll forfeit", async () => {
+      const r = await api.claimRollChallenge(session.gameId);
+      logEvent(`claim-roll-challenge: tx ${r.txId}`);
     }),
   };
 }

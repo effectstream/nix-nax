@@ -1,13 +1,13 @@
 // Per-player I-tree: the mover's pre-committed (slot, parity-bit) per turn.
 //
 // Layout — 128 turns -> 128 leaves, depth-7 tree. Leaf index = turn.
-// Leaf preimage: {domainSep "gob:idx:", turn, slot, bit, secret} where
+// Leaf preimage: {domainSep "nixnax:idx:", turn, slot, bit, secret} where
 //   slot ∈ 0..SLOTS_PER_TURN-1 — picks which of the opponent's per-turn
 //     R-leaves is used for the joint random;
 //   bit ∈ {0,1} — the mover's contribution to the XOR parity coin;
 //   secret — 32-byte salt (slot+bit alone would be brute-forceable).
 //
-// In-circuit verification: GobbletChannel.compact `indexIsUnder` (depth 7).
+// In-circuit verification: NixNaxArena.compact `indexIsUnder` (depth 7).
 
 import {
   computeIndexLeaf,
