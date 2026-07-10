@@ -169,7 +169,7 @@ test/              contract.sim + crypto (unit) · e2e/ (live-stack)
 ## Testing
 
 ```bash
-bun run test       # unit: contract simulation + crypto — no chain needed (55 tests)
+bun run test       # unit: contract simulation + crypto — no chain needed (113 tests)
 bun run test:e2e   # end-to-end against the live local stack (happy / fraud / timeout)
 bun run typecheck  # tsc --noEmit
 ```
@@ -188,6 +188,24 @@ All configuration lives in **one root `.env`** (copy [`.env.example`](.env.examp
 Per network, deploy the contract once with that network's `MIDNIGHT_*` endpoints (`bun run deploy` prints the `VITE_ARENA_ADDRESS_<NETWORK>=…` line to record), then build the webapp with `VITE_NETWORK_ID` set to that network. On real networks the in-browser session wallet/faucet and genesis wallet are disabled — players connect a browser-extension wallet and pay their own gas. Endpoints must be `https`/`wss` when the site is served over TLS.
 
 For a Linux server, **[`deploy/SERVER_SETUP.md`](deploy/SERVER_SETUP.md)** is the full runbook — clone, install toolchains, compile, start the chain stack, deploy the arena, and serve the webapp, with per-step verification. Supporting files: [`deploy/nginx.conf.example`](deploy/nginx.conf.example) (serves `webapp/dist`, aliases the ~77 MB of compiled ZK assets at `/contract/compiled/nixnax-arena/`, proxies the `/relay` WebSocket) and [`deploy/nixnax-relay.service`](deploy/nixnax-relay.service) (systemd unit for the relay).
+
+---
+
+## Known issues
+
+### Single-move opening `settle` rejected by the node (`FeeCalculation`) — needs an upstream fix
+
+**Symptom.** The **first** `settle` of a game (from turn 0) that carries **only one move** is rejected from the mempool with `Malformed(MalformedError::FeeCalculation)` and surfaces client-side as `1010: Invalid Transaction: Custom error: 168`. It never reaches contract execution.
+
+**Root cause (not the contract).** The fee the wallet/`midnight-js` balancing attaches and the fee the node's cost model demands disagree for the smallest possible settle transaction (minimal state reads + a single write). We verified this is **not** a contract bug and **not** related to Merkle/trie insertion cost:
+
+- the same 1-move settle passes in the circuit simulator (no fee layer);
+- a 1-move settle succeeds on-chain once the game already has committed state (a 1-move settle on turn 4, on a *deeper* ledger trie, passes — so depth is not the trigger);
+- any multi-move settle passes (it performs a *superset* of the same trie inserts).
+
+So the defect lives in the fee layer — the wallet SDK's estimate or the node's validator-side calculation — and needs fixing **upstream** (Midnight wallet SDK / node), not here.
+
+**Workaround.** Have a game's **first** settle batch **≥ 2 moves**. This is a client-side batching choice, not a contract rule — the contract accepts single-move settles (`assert(n > 0)`), and every later single-move settle works. Details and the isolating experiment are in [`test/e2e/timeout.test.ts`](test/e2e/timeout.test.ts).
 
 ---
 
