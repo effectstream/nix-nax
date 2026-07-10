@@ -23,6 +23,15 @@ export const createWitnesses = () => ({
   localSecret(ctx: { privateState: TicTacToePrivateState }): [TicTacToePrivateState, Uint8Array] {
     return [ctx.privateState, ctx.privateState.secret];
   },
+  // Division-by-2 witness for the in-circuit parity check (isEvenTurn): the
+  // quotient/remainder are computed here, off-circuit, and the circuit
+  // verifies 2*half + bit == value. Wrong values only fail our own proof.
+  wit_divMod2(
+    ctx: { privateState: TicTacToePrivateState },
+    value: bigint,
+  ): [TicTacToePrivateState, [bigint, bigint]] {
+    return [ctx.privateState, [value / 2n, value % 2n]];
+  },
 });
 
 export type TicTacToeWitnesses = ReturnType<typeof createWitnesses>;
