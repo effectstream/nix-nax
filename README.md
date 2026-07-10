@@ -10,7 +10,7 @@ It's a state channel: two players run the whole game peer-to-peer, then post a s
 
 ## The game
 
-A Gobblet-style game on a **4×4 board**. Each player has **12 pieces** — 3 each of 4 sizes (0 = smallest … 3 = largest). A larger piece **covers** (gobbles) a smaller one on the same cell; the visible top piece is what counts. **Four in a row** (any row, column, or diagonal) wins.
+A stacked-pieces game on a **4×4 board**. Each player has **12 pieces** — 3 each of 4 sizes (0 = smallest … 3 = largest). A larger piece **covers** a smaller one on the same cell; the visible top piece is what counts. **Four in a row** (any row, column, or diagonal) wins.
 
 Every turn opens with a **joint dice roll** (0–15) that decides the move type:
 
@@ -85,7 +85,7 @@ Only a handful of call types ever touch the chain — `createGame` / `joinGame` 
 
 ### The three Merkle trees
 
-When a game opens, each player commits **three Merkle roots** on-chain (six roots total). They never reveal the trees — only a leaf + its path, when needed, and the contract checks it against the root. Every leaf binds the **`gameId`**, so nothing can be replayed into another game. A player's per-game identity is `playerId = persistentHash("gob:id:", gameId, localSecret)` ([`src/contract/witnesses.ts`](src/contract/witnesses.ts)), proven via the `localSecret` witness — no spoofable `ownPublicKey()`.
+When a game opens, each player commits **three Merkle roots** on-chain (six roots total). They never reveal the trees — only a leaf + its path, when needed, and the contract checks it against the root. Every leaf binds the **`gameId`**, so nothing can be replayed into another game. A player's per-game identity is `playerId = persistentHash("nixnax:id:", gameId, localSecret)` ([`src/contract/witnesses.ts`](src/contract/witnesses.ts)), proven via the `localSecret` witness — no spoofable `ownPublicKey()`.
 
 | Tree | Depth / leaves | One leaf per… | Commits | Source |
 |------|----------------|---------------|---------|--------|
@@ -130,7 +130,9 @@ During the challenge window after a `settle`, the opponent can slash a cheater w
 - **`proveIndexEquivocationByX/O`** — two valid Index-tree leaves for the same turn.
 - **`proveRandomEquivocationByX/O`** — two valid Random-tree leaves for the same `(turn, slot)`.
 
-If a player simply goes silent, the other arms `startTimeout` and later `claimTimeout` to claim the forfeit. Once the window closes with no successful challenge, `claimResult` finalizes the outcome. All of this lives in [`src/contract/GobbletArena.compact`](src/contract/GobbletArena.compact).
+If a player simply goes silent, the other arms `startTimeout` and later `claimTimeout` to claim the forfeit. Once the window closes with no successful challenge, `claimResult` finalizes the outcome and mints the win token. Wins proven by a fraud proof or claimed by timeout are equally finalizable by the winner via `claimResult`, so every win path mints. The `settle` challenge window and the `startTimeout` deadline are both bounded below on-chain (`MIN_CHALLENGE_SECS` / `MIN_TIMEOUT_SECS` in [`rules.ts`](src/sdk/game/rules.ts)), so a caller can't pick a zero-length window to skip the challenge phase or arm an instant forfeit. All of this lives in [`src/contract/NixNaxArena.compact`](src/contract/NixNaxArena.compact).
+
+**The roll-class dispute** closes the one data-availability gap in the optimistic design: `proveWrongParity` needs the mover's Index reveal, which is only exchanged off-chain — so a mover who settled turns *unilaterally* (skipping the ceremony) could fabricate a class the opponent has no evidence to slash. Instead of bloating `settle` with per-move reveal proofs, the burden shifts on demand: the responder of a committed turn calls **`challengeRoll`** to demand that turn's evidence; the mover must **`answerRollChallenge`** with *both* ceremony reveals (their Index leaf and the responder's Random leaf, verified under both committed roots, re-deriving the roll and checking it matches the claimed class) before `respondBy`, or forfeit via **`claimRollChallenge`**. A mover who skipped the ceremony never received the responder's Random leaf and cannot forge it — so *being able to answer is itself proof the ceremony happened*. Answering with a different leaf than the ceremony one only publishes equivocation evidence against yourself. Each turn is challengeable once, one challenge pends at a time, and a pending challenge blocks `claimResult`.
 
 ---
 
@@ -151,7 +153,7 @@ mintShieldedToken(pad(32, "nixnax:win"), 1, nonce, left<...>(recipient));
 ## Project structure
 
 ```
-src/contract/      GobbletArena.compact — the on-chain "arena" (hosts many games) + witnesses
+src/contract/      NixNaxArena.compact — the on-chain "arena" (hosts many games) + witnesses
 src/sdk/           TypeScript SDK
   crypto/            persistent hash, the three Merkle trees, signed-move ceremony
   game/              rules + GameSession (build/verify moves, settle, disputes)
@@ -172,7 +174,20 @@ bun run test:e2e   # end-to-end against the live local stack (happy / fraud / ti
 bun run typecheck  # tsc --noEmit
 ```
 
-`bun run test` drives the compiled circuits in pure JS via `@midnight-ntwrk/compact-runtime` (open / settle / claimResult-with-mint / equivocation / timeout, plus crypto: Merkle trees, signed-move verification, serde). `bun run test:e2e` deploys to a real local chain and plays full scenarios — it needs `stack:up` running first.
+`bun run test` drives the compiled circuits in pure JS via `@midnight-ntwrk/compact-runtime` — rules, lifecycle, all fraud proofs, the roll-class dispute, plus a dedicated adversarial suite (token replay, winner-flip, malicious Merkle trees, lying witnesses, the 128-turn draw, boundary values). `bun run test:e2e` deploys to a real local chain and plays full scenarios (happy / fraud / timeout, each asserting the win-token actually mints) — it needs `stack:up` running first; the suite deploys its own short-window arena (`tictactoe.e2e.json`) so it never waits out production-length challenge windows.
+
+---
+
+## Deploying to a real network (preview / preprod / mainnet)
+
+All configuration lives in **one root `.env`** (copy [`.env.example`](.env.example)):
+
+- **`MIDNIGHT_*`** — read at runtime by the Node scripts (deploy, stack, e2e). `MIDNIGHT_WALLET_SEED` is the only secret.
+- **`VITE_*`** — baked into the webapp bundle at `vite build` time (public, not secrets). The arena address and chain endpoints are **suffixed per network** (`VITE_ARENA_ADDRESS_PREVIEW`, `VITE_INDEXER_URL_MAINNET`, …) so one `.env` holds every network; **`VITE_NETWORK_ID`** selects which row a build targets. With nothing set, everything defaults to the local `undeployed` stack.
+
+Per network, deploy the contract once with that network's `MIDNIGHT_*` endpoints (`bun run deploy` prints the `VITE_ARENA_ADDRESS_<NETWORK>=…` line to record), then build the webapp with `VITE_NETWORK_ID` set to that network. On real networks the in-browser session wallet/faucet and genesis wallet are disabled — players connect a browser-extension wallet and pay their own gas. Endpoints must be `https`/`wss` when the site is served over TLS.
+
+For a Linux server, **[`deploy/SERVER_SETUP.md`](deploy/SERVER_SETUP.md)** is the full runbook — clone, install toolchains, compile, start the chain stack, deploy the arena, and serve the webapp, with per-step verification. Supporting files: [`deploy/nginx.conf.example`](deploy/nginx.conf.example) (serves `webapp/dist`, aliases the ~77 MB of compiled ZK assets at `/contract/compiled/nixnax-arena/`, proxies the `/relay` WebSocket) and [`deploy/nixnax-relay.service`](deploy/nixnax-relay.service) (systemd unit for the relay).
 
 ---
 
@@ -180,7 +195,7 @@ bun run typecheck  # tsc --noEmit
 
 | Layer | What |
 |-------|------|
-| Contract | **Compact 0.30.0** (`GobbletArena.compact`) on **Midnight** |
+| Contract | **Compact 0.30.0** (`NixNaxArena.compact`) on **Midnight** |
 | Chain access | **midnight-js** (contracts, providers, indexer) |
 | Wallet | in-browser **WalletFacade** (`@midnight-ntwrk/wallet-sdk-*`, shielded + dust) |
 | Client | **React + Vite + TypeScript** |
@@ -191,7 +206,7 @@ bun run typecheck  # tsc --noEmit
 
 ## A note on naming
 
-The product is **Nix-Nax**. Internally the contract is **`GobbletArena`** (on-chain identifier **`gobblet-arena`**) because the game is Gobblet-style — that identifier and the `tictactoe-*` package names are load-bearing and intentionally unchanged.
+The product is **Nix-Nax**; the contract is **`NixNaxArena`** (identifier **`nixnax-arena`**). The internal `tictactoe-*` / `ttt*` package and store names are historical, load-bearing, and intentionally unchanged.
 
 ## License
 
