@@ -18,6 +18,8 @@ webapp/dist/
 # --- Secrets — NEVER commit ---
 .env
 .env.*
+# …except the documented template (contains no secrets).
+!.env.example
 .elevenlabs_key
 *.elevenlabs_key
 *.key
@@ -42,3 +44,4 @@ video-build/*.png
 video-build/subs.ass
 video-build/cues.json
 video-build/filter_complex.txt
+tictactoe.e2e.json

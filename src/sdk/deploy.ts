@@ -1,6 +1,6 @@
-// Arena deploy + attach helpers. The GobbletArena contract is deployed ONCE
+// Arena deploy + attach helpers. The NixNaxArena contract is deployed ONCE
 // per chain (small stub tx + one maintenance tx per verifier key, see
-// GobbletArenaStub.compact); afterwards every game is a fast `createGame`
+// NixNaxArenaStub.compact); afterwards every game is a fast `createGame`
 // circuit call. The deployment address is persisted and revalidated against
 // the chain on boot, so relay restarts reuse it.
 
@@ -47,14 +47,14 @@ export const DEPLOYMENT_FILE = process.env.MIDNIGHT_DEPLOYMENT_FILE
 const DEFAULT_PRIVATE_STATE_ID = "tttChannel";
 
 function makeCompiled() {
-  return CompiledContract.make("gobblet-arena", Contract as any).pipe(
+  return CompiledContract.make("nixnax-arena", Contract as any).pipe(
     CompiledContract.withWitnesses(createWitnesses() as never),
     CompiledContract.withCompiledFileAssets(ARTIFACTS_DIR),
   );
 }
 
 function makeCompiledStub() {
-  return CompiledContract.make("gobblet-arena", StubContract as any).pipe(
+  return CompiledContract.make("nixnax-arena", StubContract as any).pipe(
     CompiledContract.withWitnesses({} as never),
     CompiledContract.withCompiledFileAssets(STUB_ARTIFACTS_DIR),
   );
@@ -79,11 +79,22 @@ export interface ArenaHandle {
 
 // Deploy (or reuse) the arena and return a CACHED call handle. Safe to call
 // once at service boot; per-call attach is no longer needed.
+// Default minimum challenge/timeout/response window (block-time seconds), set
+// at deployment into the contract's sealed `minWindowSecs`. 600 = 10 min is a
+// sane production floor; the e2e driver overrides it with a small value so the
+// suite doesn't wait out real 10-minute windows.
+export const DEFAULT_MIN_WINDOW_SECS = 600n;
+
 export async function ensureArenaDeployed(opts: {
   wallet: WalletBundle;
   privateStateStoreName?: string;
   midnightDbName?: string;
+  minWindowSecs?: bigint;
+  // Override the persisted-deployment path — lets an isolated caller (e2e) keep
+  // its own short-window arena separate from the main/webapp deployment.
+  deploymentFile?: string;
 }): Promise<ArenaHandle> {
+  const deploymentFile = opts.deploymentFile ?? DEPLOYMENT_FILE;
   setNetworkId(NETWORK.networkId);
   const providers = buildProviders({
     wallet: opts.wallet,
@@ -98,9 +109,9 @@ export async function ensureArenaDeployed(opts: {
   const circuitIds = Object.keys(new (Contract as any)(createWitnesses()).impureCircuits ?? {});
   let contractAddress: string | null = null;
   let reused = false;
-  if (existsSync(DEPLOYMENT_FILE)) {
+  if (existsSync(deploymentFile)) {
     try {
-      const saved = JSON.parse(await readFile(DEPLOYMENT_FILE, "utf8")) as { contractAddress?: string };
+      const saved = JSON.parse(await readFile(deploymentFile, "utf8")) as { contractAddress?: string };
       if (saved.contractAddress) {
         const st = await (providers.publicDataProvider as any).queryContractState(saved.contractAddress);
         if (st && circuitIds.every((id) => st.operation(id) !== undefined)) {
@@ -115,12 +126,12 @@ export async function ensureArenaDeployed(opts: {
   }
 
   if (!contractAddress) {
-    log.info(`Deploying GobbletArena stub (artifacts: ${STUB_ARTIFACTS_DIR})…`);
+    log.info(`Deploying NixNaxArena stub (artifacts: ${STUB_ARTIFACTS_DIR})…`);
     const deployed = await deployContract(providers as any, {
       compiledContract: makeCompiledStub() as any,
       privateStateId: DEFAULT_PRIVATE_STATE_ID as any,
       initialPrivateState: createTicTacToePrivateState(new Uint8Array(32)) as any,
-      args: [],
+      args: [opts.minWindowSecs ?? DEFAULT_MIN_WINDOW_SECS],
     } as any);
     contractAddress = (deployed as any).deployTxData.public.contractAddress as string;
     log.info(`Deployed (no circuits yet) at ${contractAddress}`);
@@ -139,7 +150,7 @@ export async function ensureArenaDeployed(opts: {
       await waitForOperation(providers, contractAddress, circuitId);
     }
     log.info(`All ${circuitIds.length} verifier keys installed at ${contractAddress}`);
-    await writeFile(DEPLOYMENT_FILE, JSON.stringify({ contractAddress }, null, 2));
+    await writeFile(deploymentFile, JSON.stringify({ contractAddress }, null, 2));
   }
 
   const found = await findDeployedContract(providers as any, {
