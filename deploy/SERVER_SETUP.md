@@ -189,7 +189,7 @@ Notes:
 - On the dev chain the deployer is the pre-funded genesis wallet — no
   funding step needed.
 - Re-running is safe: it validates the persisted address against the chain
-  and reuses it (`tictactoe.undeployed.json`).
+  and reuses it (`nixnax.undeployed.json`).
 
 **Verify:**
 ```bash
@@ -362,7 +362,7 @@ server** running — browsers still need one):
 1. Root `.env` additions (see [`.env.example`](../.env.example)):
    `MIDNIGHT_NETWORK_ID=preview`, a **funded** `MIDNIGHT_WALLET_SEED`
    (enough NIGHT for 17 transactions), the preview node/indexer URLs, and
-   `MIDNIGHT_DEPLOYMENT_FILE=tictactoe.preview.json` (so the local dev
+   `MIDNIGHT_DEPLOYMENT_FILE=nixnax.preview.json` (so the local dev
    record isn't overwritten).
 2. `bun run deploy` — it prints the `VITE_ARENA_ADDRESS_PREVIEW=…` line to
    add to `.env`.
@@ -383,7 +383,7 @@ server** running — browsers still need one):
 | `compact: command not found` | Re-login shell (`bash -l`) or add `~/.local/bin` to PATH; installer puts the CLI there. |
 | `stack:up` port already in use | A previous stack is running: `bun run stack:down`, or check `.stack-pids.json` / `pgrep -fl midnight`. |
 | Deploy hangs at `[wallet sync …]` | Normal for ~30 s; if minutes, the indexer isn't healthy — check `.stack-logs/midnight-indexer.log`. |
-| `gameId already exists` in tests/games after a chain reset | Stale persisted address: delete `tictactoe.undeployed.json` and re-run `bun run deploy`. |
+| `gameId already exists` in tests/games after a chain reset | Stale persisted address: delete `nixnax.undeployed.json` and re-run `bun run deploy`. |
 | Browser: faucet fails with `1010 … Custom error 192` | Known dev-chain dust-registration constraint; the app falls back to the genesis wallet as gas payer automatically. |
 | First `settle` of a game with a **single move** rejected: `Malformed(…FeeCalculation)` | Known dev-node fee-model edge (wallet/node disagreement for the smallest settle tx) — not a contract bug. Play/submit ≥ 2 moves; details in `test/e2e/timeout.test.ts`. |
 | Site loads but wallet/faucet stalls remotely | The bundle was built with localhost endpoints, or ports 8088/9944/6300 are firewalled. Redo Step 7 + Step 8's firewall, rebuild. |

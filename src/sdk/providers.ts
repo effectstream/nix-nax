@@ -62,7 +62,7 @@ export function buildProviders(opts: {
   const zkConfigProvider = new NodeZkConfigProvider(opts.zkConfigPath);
   return {
     privateStateProvider: levelPrivateStateProvider({
-      midnightDbName: opts.midnightDbName ?? "tictactoe-level-db",
+      midnightDbName: opts.midnightDbName ?? "nixnax-level-db",
       privateStateStoreName: opts.privateStateStoreName,
       signingKeyStoreName: `${opts.privateStateStoreName}-signing-keys`,
       privateStoragePasswordProvider: async () => CONSTANTS.STORAGE_PASSWORD,

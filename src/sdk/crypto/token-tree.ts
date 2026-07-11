@@ -9,7 +9,7 @@
 // tokens per turn × 128 turns = 10,368 secrets.
 //
 // Leaf preimage binds the SEMANTICS (turn, kind, cell, size) — the position
-// in the tree is just a client convention, exactly like the tic-tac-toe
+// in the tree is just a client convention, exactly like the nix-nax
 // version. In-circuit verification: NixNaxArena.compact `tokenIsUnder`.
 
 import {

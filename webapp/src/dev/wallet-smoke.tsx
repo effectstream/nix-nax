@@ -11,7 +11,7 @@ import { useEffect, useRef, useState } from "react";
 import { findDeployedContract } from "@midnight-ntwrk/midnight-js-contracts";
 import { NETWORK } from "../chain/env.ts";
 import { buildAndFundWallet, waitForFunds } from "../../../src/sdk/wallet.ts";
-import { createTicTacToePrivateState } from "../../../src/contract/index.ts";
+import { createNixNaxPrivateState } from "../../../src/contract/index.ts";
 import { generatePlayerKeys } from "../game/player-session.ts";
 import { buildBrowserProviders } from "../chain/providers.ts";
 import { makeCompiled, PRIVATE_STATE_ID } from "../chain/compiled.ts";
@@ -49,7 +49,7 @@ export default function WalletSmoke() {
           contractAddress: arena.contractAddress,
           compiledContract: makeCompiled() as any,
           privateStateId: PRIVATE_STATE_ID as any,
-          initialPrivateState: createTicTacToePrivateState(new Uint8Array(32)) as any,
+          initialPrivateState: createNixNaxPrivateState(new Uint8Array(32)) as any,
         } as any);
         push("    ✅ attached — callTx ready");
 

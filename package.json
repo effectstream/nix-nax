@@ -1,16 +1,14 @@
 {
-  "name": "tictactoe-compact",
+  "name": "nixnax",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Tic-tac-toe state channel on Midnight: off-chain play, on-chain settlement with equivocation fraud proofs and timeout forfeit.",
+  "description": "NixNax: a trustless 4x4 stacked-pieces state-channel game on Midnight — off-chain play, on-chain settlement with equivocation fraud proofs, a roll-class dispute, and timeout forfeit.",
   "engines": {
-    "bun": ">=1.1",
-    "node": ">=20"
+    "bun": ">=1.1"
   },
   "scripts": {
     "compact": "compact compile +0.31.1 src/contract/NixNaxArena.compact src/contract/managed/ && compact compile +0.31.1 src/contract/NixNaxArenaStub.compact src/contract/managed-stub/",
-    "compact:check": "node compile.mjs src/contract/NixNaxArena.compact",
     "stack:up": "bun run scripts/stack-up.ts",
     "stack:down": "bun run scripts/stack-down.ts",
     "deploy": "bun run scripts/deploy.ts",
