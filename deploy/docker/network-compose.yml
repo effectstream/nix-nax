@@ -1,0 +1,79 @@
+# Local Midnight network at the PREVIEW-compatibility versions, using the
+# official PUBLIC Docker Hub images (midnightntwrk/*, multi-arch amd64+arm64) —
+# the version-matching alternative to `bun run stack:up` (whose
+# @effectstream/npm-midnight-* wrappers are pinned to older dev binaries:
+# node 0.22.5 / indexer v4.2.0 / proof-server ledger-8.0.3, amd64-only).
+#
+# NB: the images are `midnightntwrk/*` on Docker Hub (no hyphen). The reference
+# testkit uses `ghcr.io/midnight-ntwrk/*` (hyphen) which is a PRIVATE org mirror
+# (401/403 anonymously) — the Docker Hub copies are the public ones.
+#
+#   docker compose -f deploy/docker/network-compose.yml up -d
+#   # wait for all three healthy, then:  bun run deploy
+#   docker compose -f deploy/docker/network-compose.yml down -v
+#
+# Structure mirrors midnight-js testkit-js/compose.yml (indexer-standalone
+# bundles its own storage — no separate Postgres). Ports are fixed on the host
+# so the deploy script, webapp, and browsers reach the chain on the usual
+# 127.0.0.1:{9944,8088,6300}. The images are multi-arch, so this also works on
+# linux/arm64 (unlike the wrapper's ledger-8.0.3 proof server).
+#
+# Versions come from network.env so they track the compat matrix. No login
+# needed — these Docker Hub images are public.
+
+services:
+  node:
+    image: "midnightntwrk/midnight-node:${MIDNIGHT_NODE_VERSION:-1.0.0}"
+    container_name: nixnax-node
+    ports:
+      - "9944:9944"
+    environment:
+      CFG_PRESET: "dev"
+      SIDECHAIN_BLOCK_BENEFICIARY: "04bcf7ad3be7a5c790460be82a713af570f22e0f801f6659ab8e84a52be6969e"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9944/health"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  proof-server:
+    image: "midnightntwrk/proof-server:${PROOF_SERVER_VERSION:-8.1.0}"
+    container_name: nixnax-proof-server
+    command: ["midnight-proof-server --verbose"]
+    ports:
+      - "6300:6300"
+    environment:
+      RUST_BACKTRACE: "full"
+    # No healthcheck: this image ships no shell and no curl, so any CMD probe
+    # reports "unhealthy" even though the server is fine (the deploy proves every
+    # tx through it). Nothing depends_on it, so leave it unprobed — check it
+    # out-of-band with `curl http://localhost:6300/version` → 8.1.0.
+
+  indexer:
+    image: "midnightntwrk/indexer-standalone:${INDEXER_VERSION:-4.3.3}"
+    container_name: nixnax-indexer
+    ports:
+      - "8088:8088"
+    environment:
+      RUST_LOG: "indexer=info,info"
+      APP__INFRA__NODE__URL: "ws://node:9944"
+      # The SPO sub-indexer needs an RPC URL too; without it (in 4.3.x) it fails
+      # "Connection refused" and takes the whole indexer-standalone down. Point
+      # it at the node (SPO is a no-op here — BLOCKFROST_ID is a dummy).
+      APP__INFRA__SPO_NODE__URL: "ws://node:9944"
+      APP__APPLICATION__NETWORK_ID: "undeployed"
+      APP__INFRA__STORAGE__PASSWORD: "indexer"
+      APP__INFRA__PUB_SUB__PASSWORD: "indexer"
+      APP__INFRA__LEDGER_STATE_STORAGE__PASSWORD: "indexer"
+      APP__INFRA__SECRET: "303132333435363738393031323334353637383930313233343536373839303132"
+      APP__INFRA__SPO_NODE__BLOCKFROST_ID: "dummy-not-using-spo"
+    healthcheck:
+      test: ["CMD-SHELL", "cat /var/run/indexer-standalone/running"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+    depends_on:
+      node:
+        condition: service_healthy
