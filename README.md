@@ -26,7 +26,7 @@ Neither player controls the roll — it is the XOR of secret bits both sides com
 - **macOS or Linux** (ARM64 or x86_64)
 - **[Bun](https://bun.sh/)** ≥ 1.1 — package manager + runtime; runs everything here (no Node.js required)
 - **[Compact toolchain](https://docs.midnight.network)** — `compact --version` must work, **and** the pinned compiler must be installed: `compact update 0.31.1` (the build invokes `compact compile +0.31.1`, which does *not* auto-download it). The installer needs `xz-utils`; installing a compiler version needs `unzip` — both are present on most systems but absent from minimal images.
-- The local Midnight stack (node, indexer, proof server) is downloaded and run for you by the `@effectstream/npm-midnight-*` dev dependencies.
+- **[Docker](https://docs.docker.com/get-docker/)** with Compose — runs the local Midnight stack (node, indexer, proof server) from the official public images at the preview-target versions. Multi-arch, so it works on Apple Silicon too.
 
 ### Run it locally
 
@@ -37,8 +37,8 @@ bun install
 # 2. Compile the Compact contract  ->  src/contract/managed/
 bun run compact
 
-# 3. Start the local Midnight stack and wait for "Stack is up."
-#    node :9944   indexer :8088   proof server :6300   (logs in .stack-logs/)
+# 3. Start the local Midnight stack (Docker) and wait for the containers healthy.
+#    node :9944   indexer :8088   proof server :6300
 bun run stack:up
 
 # 4. Deploy the arena contract  ->  writes webapp/public/arena.json
@@ -215,7 +215,7 @@ So the defect lives in the fee layer — the wallet SDK's estimate or the node's
 | Wallet | in-browser **WalletFacade** (`@midnight-ntwrk/wallet-sdk-*`, shielded + dust) |
 | Client | **React + Vite + TypeScript** |
 | Relay | **Bun** WebSocket service (message-only) |
-| Tooling | **Bun**, **Vitest**, local Midnight stack via `@effectstream/npm-midnight-*` |
+| Tooling | **Bun**, **Vitest**, local Midnight stack via **Docker** (official preview images) |
 
 > **Version compatibility.** The compiler, JS runtime, and SDKs are pinned as a **coherent set** targeting the Midnight **preview** network — they must move together (the compiler determines the verifier-key/ledger format the runtime and proof server must match). Current pins:
 >
@@ -226,7 +226,7 @@ So the defect lives in the fee layer — the wallet SDK's estimate or the node's
 > | `@midnight-ntwrk/compact-runtime` | 0.16.0 | | `@midnight-ntwrk/midnight-js-*` | 4.1.1 |
 > | `@midnight-ntwrk/compact-js` | 2.5.1 | | `@midnight-ntwrk/wallet-sdk` (set) | 1.2.0 |
 >
-> Preview network components: node 1.0.0, indexer 4.3.3, proof server 8.1.0. Local dev uses the `@effectstream/npm-midnight-*` wrappers (their bundled dev binaries track the same ledger line).
+> Preview network components: node 1.0.0, indexer 4.3.3, proof server 8.1.0. `bun run stack:up` runs exactly these versions locally from the official public Docker images (see [`deploy/docker`](deploy/docker/README.md)).
 
 ---
 

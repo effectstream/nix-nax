@@ -1,8 +1,6 @@
 # Local Midnight network at the PREVIEW-compatibility versions, using the
-# official PUBLIC Docker Hub images (midnightntwrk/*, multi-arch amd64+arm64) —
-# the version-matching alternative to `bun run stack:up` (whose
-# @effectstream/npm-midnight-* wrappers are pinned to older dev binaries:
-# node 0.22.5 / indexer v4.2.0 / proof-server ledger-8.0.3, amd64-only).
+# official PUBLIC Docker Hub images (midnightntwrk/*, multi-arch amd64+arm64).
+# This is what `bun run stack:up` / `bun run stack:down` start and stop.
 #
 # NB: the images are `midnightntwrk/*` on Docker Hub (no hyphen). The reference
 # testkit uses `ghcr.io/midnight-ntwrk/*` (hyphen) which is a PRIVATE org mirror
