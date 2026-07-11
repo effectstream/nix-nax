@@ -1,5 +1,5 @@
 // Slim e2e driver (arena edition): the arena contract is deployed ONCE for
-// the whole suite (or reused from a prior run via tictactoe.undeployed.json);
+// the whole suite (or reused from a prior run via nixnax.undeployed.json);
 // each test opens its own GAME with a fast createGame/joinGame pair, using
 // the same deterministic fixtures as the sim tests.
 
@@ -64,13 +64,13 @@ function arena(): Promise<ArenaHandle> {
     );
     return ensureArenaDeployed({
       wallet,
-      privateStateStoreName: "ttt-e2e-arena",
-      midnightDbName: "tictactoe-level-db-e2e-arena",
+      privateStateStoreName: "nixnax-e2e-arena",
+      midnightDbName: "nixnax-level-db-e2e-arena",
       // Short window so the suite doesn't wait out real 10-minute deadlines, in
       // its own deployment file so it never reuses (or clobbers) the main arena.
       minWindowSecs: E2E_MIN_WINDOW,
       deploymentFile: path.resolve(
-        fileURLToPath(new URL("../../tictactoe.e2e.json", import.meta.url)),
+        fileURLToPath(new URL("../../nixnax.e2e.json", import.meta.url)),
       ),
     });
   })();

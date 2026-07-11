@@ -1,6 +1,6 @@
 // Quota-resilient localStorage writes.
 //
-// Every serialized session (human `ttt:session:*` and the AI's `ai-o:*`) carries
+// Every serialized session (human `nixnax:session:*` and the AI's `ai-o:*`) carries
 // the full Merkle-tree secrets — `tokenSecrets` alone is 8320×32 bytes — so each
 // entry is >1 MB in UTF-16 storage. A handful of practice games therefore blows
 // past the browser's ~5 MB localStorage quota. When that happens we free space
