@@ -9,7 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@midnight-ntwrk/compact-runtime": "0.15.0",
+    "@midnight-ntwrk/compact-runtime": "0.16.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "three": "^0.184.0"

@@ -28,10 +28,10 @@ import {
   UnshieldedWallet,
   createKeystore,
   PublicKey,
-  InMemoryTransactionHistoryStorage,
   type UnshieldedKeystore,
 } from "@midnight-ntwrk/wallet-sdk-unshielded-wallet";
-import { NetworkId } from "@midnight-ntwrk/wallet-sdk-abstractions";
+// NoOp/InMemory history storage moved to wallet-sdk-abstractions in the 1.2.0 set.
+import { NetworkId, NoOpTransactionHistoryStorage } from "@midnight-ntwrk/wallet-sdk-abstractions";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 
 import { CONSTANTS, type NetworkUrls } from "./env.ts";
@@ -64,7 +64,10 @@ function walletConfig(urls: NetworkUrls): DefaultConfiguration {
     provingServerUrl: new URL(urls.proofServer),
     relayURL: new URL(urls.node.replace("http", "ws")),
     networkId: urls.networkId,
-    txHistoryStorage: new InMemoryTransactionHistoryStorage(),
+    // We never read tx history here (deploy/faucet only need balances + submit).
+    // NoOp avoids storing/replaying history, which has been observed to make
+    // initial wallet sync more reliable than the in-memory store.
+    txHistoryStorage: new NoOpTransactionHistoryStorage(),
     costParameters: {
       additionalFeeOverhead: CONSTANTS.DUST_FEE_OVERHEAD,
       feeBlocksMargin: CONSTANTS.DUST_FEE_BLOCKS_MARGIN,
@@ -87,7 +90,7 @@ export async function buildWallet(urls: NetworkUrls, seed: string): Promise<Wall
   const dustParams = LedgerParameters.initialParameters();
   const dustCfg: any = { ...config, costParameters: { ledgerParams: dustParams, additionalFeeOverhead: CONSTANTS.DUST_FEE_OVERHEAD, feeBlocksMargin: CONSTANTS.DUST_FEE_BLOCKS_MARGIN } };
   const dust = DustWallet(dustCfg).startWithSeed(dustSeed, dustParams.dust);
-  const unshielded = UnshieldedWallet({ ...config, txHistoryStorage: new InMemoryTransactionHistoryStorage() } as any)
+  const unshielded = UnshieldedWallet({ ...config, txHistoryStorage: new NoOpTransactionHistoryStorage() } as any)
     .startWithPublicKey(PublicKey.fromKeyStore(unshieldedKeystore));
 
   const zswapSecretKeys = ZswapSecretKeys.fromSeed(shieldedSeed);
