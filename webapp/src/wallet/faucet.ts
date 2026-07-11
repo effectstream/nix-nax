@@ -12,7 +12,7 @@ import { getGenesisWallet, setGasWallet } from "./local-wallet.ts";
 import { resetArena } from "../chain/arena.ts";
 import { logEvent } from "../game/log-store.ts";
 
-const SESSION_SEED_KEY = "ttt:session-wallet-seed";
+const SESSION_SEED_KEY = "nixnax:session-wallet-seed";
 // The session wallet mints NIGHT from the local genesis seed, which only exists on
 // the `undeployed` dev chain — so it must never be offered on a real network.
 export const sessionWalletAvailable = IS_UNDEPLOYED;

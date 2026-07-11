@@ -10,7 +10,7 @@
 import { findDeployedContract } from "@midnight-ntwrk/midnight-js-contracts";
 import { encodeCoinPublicKey, rawTokenType } from "@midnight-ntwrk/compact-runtime";
 import { firstValueFrom } from "rxjs";
-import { createTicTacToePrivateState, ledger } from "../../../src/contract/index.ts";
+import { createNixNaxPrivateState, ledger } from "../../../src/contract/index.ts";
 import { buildBrowserProviders } from "./providers.ts";
 import { ARENA_ADDRESS, IS_UNDEPLOYED, NETWORK_ID } from "./env.ts";
 import { makeCompiled, PRIVATE_STATE_ID } from "./compiled.ts";
@@ -132,7 +132,7 @@ async function attach(): Promise<{ found: any; providers: any; addr: string }> {
       contractAddress: addr,
       compiledContract: makeCompiled() as any,
       privateStateId: PRIVATE_STATE_ID as any,
-      initialPrivateState: createTicTacToePrivateState(new Uint8Array(32)) as any,
+      initialPrivateState: createNixNaxPrivateState(new Uint8Array(32)) as any,
     } as any);
     return { found, providers, addr };
   })();
@@ -152,14 +152,14 @@ async function attachWithSecret(secret: Uint8Array): Promise<{ found: any }> {
   const addr = await arenaAddress();
   const providers = buildBrowserProviders({
     wallet,
-    privateStateStoreName: "ttt-arena-secret",
-    midnightDbName: "ttt-web-db-secret",
+    privateStateStoreName: "nixnax-arena-secret",
+    midnightDbName: "nixnax-web-db-secret",
   });
   const found = await findDeployedContract(providers as any, {
     contractAddress: addr,
     compiledContract: makeCompiled() as any,
     privateStateId: PRIVATE_STATE_ID as any,
-    initialPrivateState: createTicTacToePrivateState(secret) as any,
+    initialPrivateState: createNixNaxPrivateState(secret) as any,
   } as any);
   return { found };
 }

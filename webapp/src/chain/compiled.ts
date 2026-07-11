@@ -9,7 +9,7 @@ import { Contract, createWitnesses } from "../../../src/contract/index.ts";
 // Served by the `serve-contract-assets` vite plugin (see webapp/vite.config.ts).
 export const ZK_ASSETS_BASE = "/contract/compiled/nixnax-arena";
 export const CONTRACT_NAME = "nixnax-arena";
-export const PRIVATE_STATE_ID = "tttChannel";
+export const PRIVATE_STATE_ID = "nixnaxArena";
 
 export function makeCompiled() {
   return CompiledContract.make(CONTRACT_NAME, Contract as any).pipe(

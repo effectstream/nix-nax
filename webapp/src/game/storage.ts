@@ -6,8 +6,8 @@ import type { SerializedSession } from "./player-session.ts";
 import { isQuotaError, pruneAiSessions } from "./quota.ts";
 
 type Role = "x" | "o";
-const KEY = (gameId: string, role: Role) => `ttt:session:${gameId}:${role}`;
-const INDEX = "ttt:sessions:index";
+const KEY = (gameId: string, role: Role) => `nixnax:session:${gameId}:${role}`;
+const INDEX = "nixnax:sessions:index";
 
 export interface IndexEntry { addr: string; role: Role; updatedAt?: number }
 
@@ -29,7 +29,7 @@ function enforceRetention(current?: string): void {
   for (let i = localStorage.length - 1; i >= 0; i--) {
     const k = localStorage.key(i);
     if (!k) continue;
-    const m = k.match(/^ttt:session:([^:]+):(?:x|o)$/);
+    const m = k.match(/^nixnax:session:([^:]+):(?:x|o)$/);
     if (m) { if (!keep.has(m[1])) localStorage.removeItem(k); continue; }
     if (k.startsWith("ai-o:") && !keep.has(k.slice(5))) localStorage.removeItem(k);
   }
@@ -102,7 +102,7 @@ export function dropSession(addr: string, role: Role): void {
 // A set of gameIds the local AI plays as O. Kept separate from the session
 // index so the AI's own O session (stored under `ai-o:<gameId>`) never clutters
 // the human's Reconnect list. `isVsAi` lets a reconnected X game restart the AI.
-const VSAI = "ttt:vsai";
+const VSAI = "nixnax:vsai";
 const vsAiSet = (): string[] => {
   try { return JSON.parse(localStorage.getItem(VSAI) ?? "[]") as string[]; } catch { return []; }
 };

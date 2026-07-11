@@ -2,8 +2,6 @@
 
 A trustless, two-player **4×4 stacked-pieces game** on the [Midnight](https://midnight.network) blockchain, settled with **zero-knowledge proofs**. Moves are played **off-chain at memory speed** and only the result is committed on-chain — cheating is cryptographically provable, and the winner mints a shielded reward token.
 
-> Source: **[github.com/effectstream/nix-nax](https://github.com/effectstream/nix-nax)**
-
 It's a state channel: two players run the whole game peer-to-peer, then post a short, proof-backed summary to the chain. Nobody has to trust a server or each other — the contract and the proofs enforce the rules.
 
 ---
@@ -26,8 +24,7 @@ Neither player controls the roll — it is the XOR of secret bits both sides com
 ### Prerequisites
 
 - **macOS or Linux** (ARM64 or x86_64)
-- **[Bun](https://bun.sh/)** ≥ 1.1 — package manager + script runner (runs everything here; see [`.nvmrc`](.nvmrc) / `engines`)
-- **Node.js** ≥ 20 (22 LTS recommended) — only needed for the optional `compact:check` script; the main flow runs under Bun
+- **[Bun](https://bun.sh/)** ≥ 1.1 — package manager + runtime; runs everything here (no Node.js required)
 - **[Compact toolchain](https://docs.midnight.network)** — `compact --version` must work, **and** the pinned compiler must be installed: `compact update 0.31.1` (the build invokes `compact compile +0.31.1`, which does *not* auto-download it). The installer needs `xz-utils`; installing a compiler version needs `unzip` — both are present on most systems but absent from minimal images.
 - The local Midnight stack (node, indexer, proof server) is downloaded and run for you by the `@effectstream/npm-midnight-*` dev dependencies.
 
@@ -174,7 +171,7 @@ bun run test:e2e   # end-to-end against the live local stack (happy / fraud / ti
 bun run typecheck  # tsc --noEmit
 ```
 
-`bun run test` drives the compiled circuits in pure JS via `@midnight-ntwrk/compact-runtime` — rules, lifecycle, all fraud proofs, the roll-class dispute, plus a dedicated adversarial suite (token replay, winner-flip, malicious Merkle trees, lying witnesses, the 128-turn draw, boundary values). `bun run test:e2e` deploys to a real local chain and plays full scenarios (happy / fraud / timeout, each asserting the win-token actually mints) — it needs `stack:up` running first; the suite deploys its own short-window arena (`tictactoe.e2e.json`) so it never waits out production-length challenge windows.
+`bun run test` drives the compiled circuits in pure JS via `@midnight-ntwrk/compact-runtime` — rules, lifecycle, all fraud proofs, the roll-class dispute, plus a dedicated adversarial suite (token replay, winner-flip, malicious Merkle trees, lying witnesses, the 128-turn draw, boundary values). `bun run test:e2e` deploys to a real local chain and plays full scenarios (happy / fraud / timeout, each asserting the win-token actually mints) — it needs `stack:up` running first; the suite deploys its own short-window arena (`nixnax.e2e.json`) so it never waits out production-length challenge windows.
 
 ---
 
@@ -235,7 +232,7 @@ So the defect lives in the fee layer — the wallet SDK's estimate or the node's
 
 ## A note on naming
 
-The product is **Nix-Nax**; the contract is **`NixNaxArena`** (identifier **`nixnax-arena`**). The internal `tictactoe-*` / `ttt*` package and store names are historical, load-bearing, and intentionally unchanged.
+The product is **Nix-Nax**; the contract is **`NixNaxArena`** (on-chain identifier **`nixnax-arena`**). Package names, private-state store/DB names, and `nixnax:*` localStorage keys all follow the same `nixnax` naming.
 
 ## License
 

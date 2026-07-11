@@ -7,7 +7,7 @@ src/contract/managed-stub
 webapp/dist
 .stack-logs
 .stack-pids.json
-tictactoe.*.json
+nixnax.*.json
 .git
 .env
 .env.*

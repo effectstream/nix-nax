@@ -67,11 +67,11 @@ export function buildBrowserProviders(opts: {
 }): MidnightProviders {
   assertNetworkConfigured();
   const adapter = walletAndMidnight(opts.wallet);
-  const store = opts.privateStateStoreName ?? "ttt-arena";
+  const store = opts.privateStateStoreName ?? "nixnax-arena";
   const zkConfigProvider = new FetchZkConfigProvider(ZK_BASE, fetch.bind(window));
   return {
     privateStateProvider: levelPrivateStateProvider({
-      midnightDbName: opts.midnightDbName ?? "ttt-web-db",
+      midnightDbName: opts.midnightDbName ?? "nixnax-web-db",
       privateStateStoreName: store,
       signingKeyStoreName: `${store}-signing-keys`,
       privateStoragePasswordProvider: async () => STORAGE_PASSWORD,

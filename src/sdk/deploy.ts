@@ -20,8 +20,8 @@ import { fileURLToPath } from "node:url";
 import {
   Contract,
   createWitnesses,
-  createTicTacToePrivateState,
-  type TicTacToePrivateState,
+  createNixNaxPrivateState,
+  type NixNaxPrivateState,
   ledger,
 } from "../contract/index.ts";
 import { Contract as StubContract } from "../contract/managed-stub/contract/index.js";
@@ -42,9 +42,9 @@ const STUB_ARTIFACTS_DIR = path.resolve(
 // relay, stack scripts, e2e driver — sees the same persisted deployment.
 export const DEPLOYMENT_FILE = process.env.MIDNIGHT_DEPLOYMENT_FILE
   ? path.resolve(process.env.MIDNIGHT_DEPLOYMENT_FILE)
-  : path.resolve(fileURLToPath(new URL("../..", import.meta.url)), "tictactoe.undeployed.json");
+  : path.resolve(fileURLToPath(new URL("../..", import.meta.url)), "nixnax.undeployed.json");
 
-const DEFAULT_PRIVATE_STATE_ID = "tttChannel";
+const DEFAULT_PRIVATE_STATE_ID = "nixnaxArena";
 
 function makeCompiled() {
   return CompiledContract.make("nixnax-arena", Contract as any).pipe(
@@ -99,9 +99,9 @@ export async function ensureArenaDeployed(opts: {
   const providers = buildProviders({
     wallet: opts.wallet,
     zkConfigPath: ARTIFACTS_DIR,
-    privateStateStoreName: opts.privateStateStoreName ?? "ttt-arena",
+    privateStateStoreName: opts.privateStateStoreName ?? "nixnax-arena",
     networkUrls: NETWORK,
-    midnightDbName: opts.midnightDbName ?? "tictactoe-level-db-arena",
+    midnightDbName: opts.midnightDbName ?? "nixnax-level-db-arena",
   });
 
   // Reuse a persisted deployment if the chain still knows it AND it has all
@@ -130,7 +130,7 @@ export async function ensureArenaDeployed(opts: {
     const deployed = await deployContract(providers as any, {
       compiledContract: makeCompiledStub() as any,
       privateStateId: DEFAULT_PRIVATE_STATE_ID as any,
-      initialPrivateState: createTicTacToePrivateState(new Uint8Array(32)) as any,
+      initialPrivateState: createNixNaxPrivateState(new Uint8Array(32)) as any,
       args: [opts.minWindowSecs ?? DEFAULT_MIN_WINDOW_SECS],
     } as any);
     contractAddress = (deployed as any).deployTxData.public.contractAddress as string;
@@ -157,7 +157,7 @@ export async function ensureArenaDeployed(opts: {
     contractAddress: contractAddress as any,
     compiledContract: makeCompiled() as any,
     privateStateId: DEFAULT_PRIVATE_STATE_ID as any,
-    initialPrivateState: createTicTacToePrivateState(new Uint8Array(32)) as any,
+    initialPrivateState: createNixNaxPrivateState(new Uint8Array(32)) as any,
   } as any);
 
   return { contractAddress, wallet: opts.wallet, providers, found, reused };
@@ -199,15 +199,15 @@ export async function attachWithSecret(opts: {
   const providers = buildProviders({
     wallet: opts.wallet,
     zkConfigPath: ARTIFACTS_DIR,
-    privateStateStoreName: `ttt-arena-${opts.storeSuffix}`,
+    privateStateStoreName: `nixnax-arena-${opts.storeSuffix}`,
     networkUrls: NETWORK,
-    midnightDbName: `tictactoe-level-db-${opts.storeSuffix}`,
+    midnightDbName: `nixnax-level-db-${opts.storeSuffix}`,
   });
   const found = await findDeployedContract(providers as any, {
     contractAddress: opts.contractAddress as any,
     compiledContract: makeCompiled() as any,
     privateStateId: DEFAULT_PRIVATE_STATE_ID as any,
-    initialPrivateState: createTicTacToePrivateState(opts.secret) as any,
+    initialPrivateState: createNixNaxPrivateState(opts.secret) as any,
   } as any);
   return { found, providers };
 }

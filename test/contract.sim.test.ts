@@ -13,7 +13,7 @@ import {
 } from "@midnight-ntwrk/compact-runtime";
 
 import { Contract, ledger, Status, Winner } from "../src/contract/managed/contract/index.js";
-import { createWitnesses, createTicTacToePrivateState } from "../src/contract/witnesses.ts";
+import { createWitnesses, createNixNaxPrivateState } from "../src/contract/witnesses.ts";
 import {
   playersA,
   playersB,
@@ -63,7 +63,7 @@ function newCircuitCtx<PS>(contractState: any, privateState: PS, time?: number):
 
 // Deploy the (stateless) arena and open one game for the fixture pair.
 function setup(pair: TestPair, playerSecret?: Uint8Array) {
-  const privateState = createTicTacToePrivateState(playerSecret ?? pair.x.secret);
+  const privateState = createNixNaxPrivateState(playerSecret ?? pair.x.secret);
   const contract = new Contract(createWitnesses() as any);
 
   const ctorCtx = createConstructorContext(privateState, ZERO_KEY as any);
@@ -429,7 +429,7 @@ describe("settle (stop-at-win + guards)", () => {
     const chunk = packChunk(pair, 0, [P(0, 0)]);
     chunk.paths[0] = pair.x.token.pathFor(0, KIND_PLACE, 1, 0);
     chunk.secrets[0] = pair.x.token.secrets[0][1];
-    const ctx = newCircuitCtx(state, createTicTacToePrivateState(pair.x.secret), 1000);
+    const ctx = newCircuitCtx(state, createNixNaxPrivateState(pair.x.secret), 1000);
     expect(() =>
       contract.impureCircuits.settle(
         ctx, pair.gameId, chunk.nMoves, chunk.parities, chunk.kinds, chunk.cells, chunk.sizes, chunk.secrets, chunk.paths, 5000n,
@@ -632,7 +632,7 @@ describe("timeout", () => {
     const pair = playersA();
     const { contract, privateState, state } = setup(pair);
     const s1 = settleChunk(contract, state, privateState, pair, 0, [P(0, 0)]);
-    const oPrivate = createTicTacToePrivateState(pair.o.secret);
+    const oPrivate = createNixNaxPrivateState(pair.o.secret);
     const ctx = newCircuitCtx(s1, oPrivate, 1100);
     expect(() => (contract.impureCircuits as any).startTimeout(ctx, pair.gameId, 2000n)).toThrow(/only the waiting player/);
   });
@@ -685,7 +685,7 @@ describe("roll-class dispute", () => {
     const s1 = settleChunk(contract, state, privateState, pair, 0, WIN_X, { time: 1000, until: 2000n });
     expect(dynOf(led(s1), pair).winner).toBe(Winner.x);
     // O disputes turn 2 of the winning history.
-    const oPrivate = createTicTacToePrivateState(pair.o.secret);
+    const oPrivate = createNixNaxPrivateState(pair.o.secret);
     let ctx = newCircuitCtx(s1, oPrivate, 1100);
     const ch = (contract.impureCircuits as any).challengeRoll(ctx, pair.gameId, 2n, 1800n);
     let st = ch.context.currentQueryContext.state;
@@ -805,7 +805,7 @@ describe("security regressions", () => {
     const { contract, privateState, state } = setup(pair); // X's secret; X wins
     const s1 = settleChunk(contract, state, privateState, pair, 0, WIN_X, { time: 1000, until: 3000n });
     expect(dynOf(led(s1), pair).winner).toBe(Winner.x);
-    const oPrivate = createTicTacToePrivateState(pair.o.secret);
+    const oPrivate = createNixNaxPrivateState(pair.o.secret);
     const ctx = newCircuitCtx(s1, oPrivate, 1100);
     expect(() => (contract.impureCircuits as any).startTimeout(ctx, pair.gameId, 3000n))
       .toThrow(/game already decided/);
@@ -867,7 +867,7 @@ describe("security regressions", () => {
 // ═════════════════════════════════════════════════════════════════════════════
 
 const RECIP = { bytes: new Uint8Array(32).fill(7) };
-const secretPS = (pair: TestPair, who: "x" | "o") => createTicTacToePrivateState(pair[who].secret);
+const secretPS = (pair: TestPair, who: "x" | "o") => createNixNaxPrivateState(pair[who].secret);
 
 // ── 1.1 Token replay / forgery ──────────────────────────────────────────────
 describe("cheat: token replay & forgery", () => {
@@ -1057,7 +1057,7 @@ describe("cheat: claimResult abuse", () => {
     const pair = playersC();
     const { contract, privateState, state } = setup(pair);
     const s1 = settleChunk(contract, state, privateState, pair, 0, WIN_X, { time: 1000, until: 2000n });
-    const stranger = createTicTacToePrivateState(new Uint8Array(32).fill(123));
+    const stranger = createNixNaxPrivateState(new Uint8Array(32).fill(123));
     const ctx = newCircuitCtx(s1, stranger, 2500);
     expect(() => (contract.impureCircuits as any).claimResult(ctx, pair.gameId, RECIP))
       .toThrow(/prove knowledge of a registered player secret/);
@@ -1092,7 +1092,7 @@ describe("cheat: roll-dispute edge abuse", () => {
     const pair = playersA();
     const { contract, privateState, state } = setup(pair);
     const s1 = settleChunk(contract, state, privateState, pair, 0, OPENING);
-    const stranger = createTicTacToePrivateState(new Uint8Array(32).fill(200));
+    const stranger = createNixNaxPrivateState(new Uint8Array(32).fill(200));
     const ctx = newCircuitCtx(s1, stranger, 1100);
     expect(() => (contract.impureCircuits as any).challengeRoll(ctx, pair.gameId, 2n, 1800n))
       .toThrow(/prove knowledge of a registered player secret/);
@@ -1205,7 +1205,7 @@ describe("cheat: adversarial constructions", () => {
       wit_divMod2: (ctx: any, value: bigint): [any, [bigint, bigint]] =>
         [ctx.privateState, [value / 2n, value % 2n === 0n ? 1n : 0n]],
     };
-    const privateState = createTicTacToePrivateState(pair.x.secret);
+    const privateState = createNixNaxPrivateState(pair.x.secret);
     const contract = new Contract(badWitnesses as any);
     const ctorCtx = createConstructorContext(privateState, ZERO_KEY as any);
     let state = contract.initialState(ctorCtx, SIM_MIN_WINDOW).currentContractState;
@@ -1340,7 +1340,7 @@ describe("boundaries: windows, chunk size, ranges", () => {
 
   test("startTimeout on a half-open (not-yet-joined) game is rejected", () => {
     const pair = playersC();
-    const privateState = createTicTacToePrivateState(pair.x.secret);
+    const privateState = createNixNaxPrivateState(pair.x.secret);
     const contract = new Contract(createWitnesses() as any);
     let state = contract.initialState(createConstructorContext(privateState, ZERO_KEY as any), SIM_MIN_WINDOW).currentContractState;
     // Only createGame — no joinGame, so status is halfOpen.
