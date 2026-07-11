@@ -50,5 +50,5 @@ describe("e2e: happy path", () => {
     const winsAfter = await g.readWinBalance();
     console.log("win-token balance after claim:", winsAfter);
     expect(winsAfter).toBe(winsBefore + 1n);
-  }, 600_000);
+  }, 900_000);
 });

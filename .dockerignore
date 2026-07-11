@@ -1,0 +1,15 @@
+# Docker build does a CLEAN install/compile inside the image — never ship local
+# artifacts into the build context (they'd be stale and huge). Only affects
+# `docker build` / `docker compose build`.
+**/node_modules
+src/contract/managed
+src/contract/managed-stub
+webapp/dist
+.stack-logs
+.stack-pids.json
+tictactoe.*.json
+.git
+.env
+.env.*
+!.env.example
+video-build

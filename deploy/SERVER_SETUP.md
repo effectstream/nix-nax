@@ -48,7 +48,9 @@ and submits every on-chain transaction. The server hosts:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y git curl unzip nginx
+# xz-utils is required by the Compact installer (it ships a .tar.xz archive); on
+# minimal images its absence fails the install with "xz: Cannot exec".
+sudo apt-get install -y git curl unzip xz-utils nginx
 
 # Service user + directory
 sudo useradd -r -m -d /home/nixnax -s /bin/bash nixnax || true
@@ -68,15 +70,19 @@ because the compiled artifacts are gitignored and nginx serves the ~77 MB of
 prover keys from them):
 
 ```bash
-sudo -iu nixnax bash -c "curl --proto '=https' --tlsv1.2 -LsSf \
+sudo -iu nixnax bash -lc "curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/midnightntwrk/compact/releases/latest/download/compact-installer.sh | sh"
+# The installer needs xz-utils (installed in Step 1) to extract its archive.
+# Then install the PINNED compiler — `compact compile +0.31.1` does NOT
+# auto-download it (needs unzip, also from Step 1):
+sudo -iu nixnax bash -lc "export PATH=\$HOME/.local/bin:\$PATH && compact update 0.31.1"
 ```
 
-> If that URL 404s, get the current install command from
+> If the installer URL 404s, get the current command from
 > https://docs.midnight.network (Compact developer tools) or the
-> `midnightntwrk/compact` GitHub releases page. The project pins compiler
-> version **0.30.0**; the `+0.30.0` in the build script downloads that exact
-> toolchain on first use automatically.
+> `midnightntwrk/compact` GitHub releases page. `compact` installs to
+> `~/.local/bin` — the `bash -lc` login shell picks it up via the installer's
+> PATH entry; if not, add `~/.local/bin` to PATH.
 
 **Verify:**
 ```bash

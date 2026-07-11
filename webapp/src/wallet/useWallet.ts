@@ -43,6 +43,16 @@ export async function connect(wallet: InitialAPI): Promise<void> {
   set({ connecting: true });
   try {
     const api = await connectWallet(wallet, NETWORK_ID);
+    // ENFORCE network match: passing NETWORK_ID to connect() is only a request —
+    // extensions may connect on whatever network they're set to. A wallet on a
+    // different chain than the app can't fund gas or see the arena, so reject it
+    // with a clear message instead of leaving a silently-broken connection.
+    const cfg = await api.getConfiguration().catch(() => null);
+    if (cfg && cfg.networkId !== NETWORK_ID) {
+      set({ connecting: false });
+      logEvent(`! wallet on network "${cfg.networkId}" but the app is on "${NETWORK_ID}" — switch the wallet's network and reconnect`);
+      return;
+    }
     const [addr, dust] = await Promise.all([
       api.getUnshieldedAddress().catch(() => null),
       api.getDustBalance().catch(() => null),

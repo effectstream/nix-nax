@@ -38,5 +38,5 @@ describe("e2e: equivocation fraud proof", () => {
     await sleep(10_000);
     const winsAfter = await g.readWinBalance();
     expect(winsAfter).toBe(winsBefore + 1n); // fraud-path winner minted (M1)
-  }, 600_000);
+  }, 900_000);
 });

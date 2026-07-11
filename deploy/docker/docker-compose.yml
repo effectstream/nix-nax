@@ -1,0 +1,40 @@
+# Clean-room experiment: brings up the WHOLE Nix-Nax dev stack in one container
+# by running the README Quickstart steps verbatim (chain → deploy → relay →
+# webapp). Purpose is to catch setup/connection breakage a fresh clone hits.
+#
+#   docker compose -f deploy/docker/docker-compose.yml up --build
+#   → open http://localhost:5173
+#
+# One container mirrors the README's single-machine flow (everything on
+# localhost). The browser (on the host) reaches the published ports; the webapp
+# talks to the chain on 127.0.0.1:{8088,9944,6300} = these published ports.
+
+services:
+  nixnax:
+    build:
+      # Context is the repo root so the whole project is available to COPY.
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    image: nixnax-experiment
+    container_name: nixnax-experiment
+    # Pin to amd64: the pinned Midnight stack (ledger-8.0.3) publishes a
+    # complete binary set only for linux/amd64. linux/arm64 is MISSING the
+    # proof-server at ledger-8.0.3 (upstream effectstream/binaries has arm64
+    # only at ledger-8.1.0), so the proof server 404s on ARM. On Apple Silicon
+    # this runs under emulation (slower); real deployment servers are amd64.
+    platform: linux/amd64
+    ports:
+      - "5173:5173"   # webapp (vite dev)
+      - "8088:8088"   # indexer (browser connects directly)
+      - "9944:9944"   # node    (browser connects directly)
+      - "6300:6300"   # proof server (browser connects directly)
+      - "4310:4310"   # relay (also proxied via /relay; exposed for debugging)
+    # The dev chain (node+indexer+proof) is memory-hungry; give it headroom.
+    shm_size: "1gb"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "-o", "/dev/null", "http://127.0.0.1:5173"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 300s   # first run downloads ~450MB of Midnight binaries
+    stop_grace_period: 20s

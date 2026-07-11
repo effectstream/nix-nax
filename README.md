@@ -26,9 +26,9 @@ Neither player controls the roll — it is the XOR of secret bits both sides com
 ### Prerequisites
 
 - **macOS or Linux** (ARM64 or x86_64)
-- **[Bun](https://bun.sh/)** — package manager + script runner
-- **Node.js** — runtime for the TypeScript SDK
-- **[Compact toolchain](https://docs.midnight.network)** — `compact --version` must work; this project pins **`+0.30.0`** (the build invokes `compact compile +0.30.0`)
+- **[Bun](https://bun.sh/)** ≥ 1.1 — package manager + script runner (runs everything here; see [`.nvmrc`](.nvmrc) / `engines`)
+- **Node.js** ≥ 20 (22 LTS recommended) — only needed for the optional `compact:check` script; the main flow runs under Bun
+- **[Compact toolchain](https://docs.midnight.network)** — `compact --version` must work, **and** the pinned compiler must be installed: `compact update 0.31.1` (the build invokes `compact compile +0.31.1`, which does *not* auto-download it). The installer needs `xz-utils`; installing a compiler version needs `unzip` — both are present on most systems but absent from minimal images.
 - The local Midnight stack (node, indexer, proof server) is downloaded and run for you by the `@effectstream/npm-midnight-*` dev dependencies.
 
 ### Run it locally
@@ -49,12 +49,12 @@ bun run deploy
 
 # 5. Start the message relay on :4310 (a dumb WebSocket switchboard for moves).
 #    Required for ALL play — even Practice-vs-AI marshals moves through it.
-bun --cwd relay install
-bun --cwd relay run start
+#    NOTE: use `cd <dir> && bun …` — `bun --cwd relay install` is (mis)parsed as
+#    `bun run install` by current Bun and fails with "Script not found".
+(cd relay && bun install && bun run start)     # relay has no deps; install is a no-op
 
 # 6. Start the web client on :5173 (in another terminal)
-bun --cwd webapp install
-bun --cwd webapp run dev
+(cd webapp && bun install && bun run dev)
 ```
 
 Open **http://localhost:5173**, click the **Wallet** button (top-right) and use the **faucet** to fund an in-browser session wallet, then hit **New game**, **Join a game**, or **Practice vs AI**.
@@ -213,12 +213,23 @@ So the defect lives in the fee layer — the wallet SDK's estimate or the node's
 
 | Layer | What |
 |-------|------|
-| Contract | **Compact 0.30.0** (`NixNaxArena.compact`) on **Midnight** |
+| Contract | **Compact 0.31.1** (`NixNaxArena.compact`) on **Midnight** |
 | Chain access | **midnight-js** (contracts, providers, indexer) |
 | Wallet | in-browser **WalletFacade** (`@midnight-ntwrk/wallet-sdk-*`, shielded + dust) |
 | Client | **React + Vite + TypeScript** |
 | Relay | **Bun** WebSocket service (message-only) |
 | Tooling | **Bun**, **Vitest**, local Midnight stack via `@effectstream/npm-midnight-*` |
+
+> **Version compatibility.** The compiler, JS runtime, and SDKs are pinned as a **coherent set** targeting the Midnight **preview** network — they must move together (the compiler determines the verifier-key/ledger format the runtime and proof server must match). Current pins:
+>
+> | Component | Version | | Component | Version |
+> |---|---|---|---|---|
+> | Compact compiler (`+`) | 0.31.1 | | `@midnight-ntwrk/ledger-v8` | 8.1.0 |
+> | Compact devtools (`compact`) | 0.5.1 | | `@midnight-ntwrk/onchain-runtime-v3` | 3.0.0 |
+> | `@midnight-ntwrk/compact-runtime` | 0.16.0 | | `@midnight-ntwrk/midnight-js-*` | 4.1.1 |
+> | `@midnight-ntwrk/compact-js` | 2.5.1 | | `@midnight-ntwrk/wallet-sdk` (set) | 1.2.0 |
+>
+> Preview network components: node 1.0.0, indexer 4.3.3, proof server 8.1.0. Local dev uses the `@effectstream/npm-midnight-*` wrappers (their bundled dev binaries track the same ledger line).
 
 ---
 

@@ -98,6 +98,12 @@ export default function WalletButton() {
                     <span className="pay">you pay gas</span>
                   </button>
                 ))}
+                {isLocal && (
+                  <p className="muted" style={{ margin: "6px 2px 0" }}>
+                    External wallets must be set to <strong>{NETWORK_ID}</strong> and self-funded —
+                    there's no faucet for them here. On the local dev chain, use the Session Wallet above.
+                  </p>
+                )}
               </div>
             )}
 
