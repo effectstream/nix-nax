@@ -52,8 +52,13 @@ sudo apt-get update
 # minimal images its absence fails the install with "xz: Cannot exec".
 sudo apt-get install -y git curl unzip xz-utils nginx
 
+# Docker + Compose run the Midnight chain stack (Step 4). Install Docker Engine
+# per https://docs.docker.com/engine/install/ for your distro, then:
+sudo systemctl enable --now docker
+
 # Service user + directory
 sudo useradd -r -m -d /home/nixnax -s /bin/bash nixnax || true
+sudo usermod -aG docker nixnax          # let the service user reach the Docker daemon
 sudo mkdir -p /srv/nixnax
 sudo chown nixnax:nixnax /srv/nixnax
 ```
@@ -129,23 +134,27 @@ sudo -iu nixnax bash -lc 'ls /srv/nixnax/src/contract/managed/keys/*.prover | wc
 
 ## Step 4 — Start the Midnight chain stack
 
-Downloads and launches the official node, indexer, and proof-server binaries
-(via the `@effectstream/npm-midnight-*` dev packages), detached, with logs in
-`.stack-logs/` and PIDs in `.stack-pids.json`.
+`bun run stack:up` launches node, indexer, and proof server as Docker containers
+from the official public images (`deploy/docker/network-compose.yml`), at the
+preview-target versions. **Requires Docker + Compose** and that the `nixnax` user
+can talk to the daemon (`sudo usermod -aG docker nixnax`, then re-login).
 
 ```bash
 sudo -iu nixnax bash -lc 'cd /srv/nixnax && bun run stack:up'
-# wait for it to print "Stack is up."
+# wait for the containers to report healthy:
+sudo -iu nixnax bash -lc 'cd /srv/nixnax && docker compose -f deploy/docker/network-compose.yml ps'
 ```
 
-The processes are detached and survive the command exiting, but **not a
-reboot**. For unattended operation, install the oneshot unit:
+Containers run detached and survive the command exiting. To survive a **reboot**,
+add `restart: unless-stopped` to the services (Docker restarts them on boot), or
+manage the compose file with a systemd unit:
 
 ```bash
 sudo tee /etc/systemd/system/nixnax-stack.service >/dev/null <<'EOF'
 [Unit]
 Description=Nix-Nax local Midnight stack (node + indexer + proof server)
-After=network-online.target
+Requires=docker.service
+After=docker.service network-online.target
 Wants=network-online.target
 
 [Service]
@@ -164,13 +173,14 @@ sudo systemctl daemon-reload && sudo systemctl enable nixnax-stack
 # (don't `start` it now if stack:up is already running — it's already up)
 ```
 
-**Verify (all three must respond):**
+**Verify (node + indexer must respond; proof server has no HTTP healthcheck but
+answers `/version`):**
 ```bash
 curl -sf http://127.0.0.1:9944/health >/dev/null && echo node-ok
 curl -sf -o /dev/null http://127.0.0.1:8088/api/v3/graphql && echo indexer-ok
-curl -sf -o /dev/null http://127.0.0.1:6300 && echo proof-ok
+curl -sf http://127.0.0.1:6300/version && echo proof-ok
 ```
-If any fail, check `/srv/nixnax/.stack-logs/*.log`.
+If any fail, check container logs: `docker compose -f deploy/docker/network-compose.yml logs`.
 
 ---
 
@@ -381,8 +391,8 @@ server** running — browsers still need one):
 | Symptom | Cause / fix |
 |---|---|
 | `compact: command not found` | Re-login shell (`bash -l`) or add `~/.local/bin` to PATH; installer puts the CLI there. |
-| `stack:up` port already in use | A previous stack is running: `bun run stack:down`, or check `.stack-pids.json` / `pgrep -fl midnight`. |
-| Deploy hangs at `[wallet sync …]` | Normal for ~30 s; if minutes, the indexer isn't healthy — check `.stack-logs/midnight-indexer.log`. |
+| `stack:up` port already in use | A previous stack is running: `bun run stack:down`, or check `docker ps` for stray `nixnax-*` containers. |
+| Deploy hangs at `[wallet sync …]` | Normal for ~30 s; if minutes, the indexer isn't healthy — `docker compose -f deploy/docker/network-compose.yml logs indexer`. |
 | `gameId already exists` in tests/games after a chain reset | Stale persisted address: delete `nixnax.undeployed.json` and re-run `bun run deploy`. |
 | Browser: faucet fails with `1010 … Custom error 192` | Known dev-chain dust-registration constraint; the app falls back to the genesis wallet as gas payer automatically. |
 | First `settle` of a game with a **single move** rejected: `Malformed(…FeeCalculation)` | Known dev-node fee-model edge (wallet/node disagreement for the smallest settle tx) — not a contract bug. Play/submit ≥ 2 moves; details in `test/e2e/timeout.test.ts`. |
@@ -395,7 +405,7 @@ server** running — browsers still need one):
 ```bash
 # Chain stack
 sudo systemctl {start|stop|status} nixnax-stack     # or: bun run stack:up / stack:down
-tail -f /srv/nixnax/.stack-logs/*.log
+docker compose -f /srv/nixnax/deploy/docker/network-compose.yml logs -f
 
 # Relay
 sudo systemctl {restart|status} nixnax-relay

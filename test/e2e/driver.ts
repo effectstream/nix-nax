@@ -46,7 +46,7 @@ async function submitWithRetry<T>(label: string, fn: () => Promise<T>, tries = 3
       if (!flaky || i === tries - 1) throw e;
       // 45s: long enough for the wallet to ingest the previous tx's dust change
       // (the usual root cause is a DustDoubleSpend from balancing against a
-      // stale local dust set — see .stack-logs/midnight-node.log).
+      // stale local dust set — see `docker compose … logs node`).
       console.log(`${label}: transient submission error (attempt ${i + 1}/${tries}) — retrying in 45s…`);
       await new Promise((r) => setTimeout(r, 45_000));
     }

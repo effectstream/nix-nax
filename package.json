@@ -9,8 +9,8 @@
   },
   "scripts": {
     "compact": "compact compile +0.31.1 src/contract/NixNaxArena.compact src/contract/managed/ && compact compile +0.31.1 src/contract/NixNaxArenaStub.compact src/contract/managed-stub/",
-    "stack:up": "bun run scripts/stack-up.ts",
-    "stack:down": "bun run scripts/stack-down.ts",
+    "stack:up": "docker compose -f deploy/docker/network-compose.yml --env-file deploy/docker/network.env up -d",
+    "stack:down": "docker compose -f deploy/docker/network-compose.yml down -v",
     "deploy": "bun run scripts/deploy.ts",
     "test": "vitest run test/contract.sim.test.ts test/crypto.test.ts",
     "test:e2e": "vitest run test/e2e --testTimeout=900000 --no-file-parallelism --pool=forks --poolOptions.forks.singleFork",
@@ -40,13 +40,9 @@
     "rxjs": "^7.8.2"
   },
   "devDependencies": {
-    "@effectstream/npm-midnight-indexer": "^0.101.1",
-    "@effectstream/npm-midnight-node": "^0.101.1",
-    "@effectstream/npm-midnight-proof-server": "^0.101.1",
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0",
     "vite-plugin-node-polyfills": "0.24.0",
-    "vitest": "^3.2.4",
-    "wait-on": "8.0.3"
+    "vitest": "^3.2.4"
   }
 }
