@@ -26,6 +26,7 @@ import { CONSTANTS } from "../../../src/sdk/env.ts";
 import { NETWORK, STORAGE_PASSWORD, assertNetworkConfigured } from "./env.ts";
 import type { WalletBundle } from "../../../src/sdk/wallet.ts";
 import { ZK_ASSETS_BASE } from "./compiled.ts";
+import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import type { ConnectedAPI } from "../wallet/connector.ts";
 import { createConnectorWalletProviders } from "../wallet/connector-adapter.ts";
 
@@ -100,6 +101,10 @@ export async function buildConnectorProviders(opts: {
 }): Promise<MidnightProviders> {
   assertNetworkConfigured();
   const config = await opts.api.getConfiguration();
+  // The local-wallet path sets this inside buildWallet(); the connector path
+  // builds no SDK wallet, so set it here from the wallet's own network before
+  // any contract op (else: "Network ID has not been configured").
+  setNetworkId(config.networkId as any);
   const sh = await opts.api.getShieldedAddresses();
   const store = opts.privateStateStoreName ?? "nixnax-arena-connector";
   const zkConfigProvider = new FetchZkConfigProvider(ZK_BASE, fetch.bind(window));
