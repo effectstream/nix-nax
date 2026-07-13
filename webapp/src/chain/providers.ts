@@ -84,3 +84,47 @@ export function buildBrowserProviders(opts: {
     midnightProvider: adapter,
   };
 }
+
+// Wallet-LESS provider set for the connected-extension (DApp-connector) path.
+// The browser only BUILDS + PROVES the tx here; the extension wallet does the
+// dust balancing + signing + submit (via balanceUnsealedTransaction /
+// submitTransaction), so we don't have a local WalletBundle. balanceTx/submitTx
+// must never be called on this set — the connector handles those.
+function connectorAdapter(coinPublicKey: CoinPublicKey, encryptionPublicKey: EncPublicKey): WalletProvider & MidnightProvider {
+  return {
+    getCoinPublicKey: () => coinPublicKey,
+    getEncryptionPublicKey: () => encryptionPublicKey,
+    balanceTx(): Promise<FinalizedTransaction> {
+      throw new Error("connector path: balancing is done by the extension wallet, not the provider");
+    },
+    submitTx(): Promise<TransactionId> {
+      throw new Error("connector path: submission is done by the extension wallet, not the provider");
+    },
+  };
+}
+
+export function buildConnectorProviders(opts: {
+  coinPublicKey: CoinPublicKey;
+  encryptionPublicKey: EncPublicKey;
+  privateStateStoreName?: string;
+  midnightDbName?: string;
+}): MidnightProviders {
+  assertNetworkConfigured();
+  const adapter = connectorAdapter(opts.coinPublicKey, opts.encryptionPublicKey);
+  const store = opts.privateStateStoreName ?? "nixnax-arena-connector";
+  const zkConfigProvider = new FetchZkConfigProvider(ZK_BASE, fetch.bind(window));
+  return {
+    privateStateProvider: levelPrivateStateProvider({
+      midnightDbName: opts.midnightDbName ?? "nixnax-web-db-connector",
+      privateStateStoreName: store,
+      signingKeyStoreName: `${store}-signing-keys`,
+      privateStoragePasswordProvider: async () => STORAGE_PASSWORD,
+      accountId: "nixnax-connector",
+    } as any),
+    publicDataProvider: indexerPublicDataProvider(NETWORK.indexer, NETWORK.indexerWS),
+    zkConfigProvider: zkConfigProvider as any,
+    proofProvider: httpClientProofProvider(NETWORK.proofServer, zkConfigProvider as any),
+    walletProvider: adapter,
+    midnightProvider: adapter,
+  };
+}

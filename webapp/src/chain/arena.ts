@@ -7,14 +7,15 @@
 // Codecs + the per-action argument order are ported verbatim from the old
 // relay/server.ts so the on-chain calls are byte-identical.
 
-import { findDeployedContract } from "@midnight-ntwrk/midnight-js-contracts";
+import { findDeployedContract, createUnprovenCallTx } from "@midnight-ntwrk/midnight-js-contracts";
 import { encodeCoinPublicKey, rawTokenType } from "@midnight-ntwrk/compact-runtime";
 import { firstValueFrom } from "rxjs";
 import { createNixNaxPrivateState, ledger } from "../../../src/contract/index.ts";
-import { buildBrowserProviders } from "./providers.ts";
+import { buildBrowserProviders, buildConnectorProviders } from "./providers.ts";
 import { ARENA_ADDRESS, IS_UNDEPLOYED, NETWORK_ID } from "./env.ts";
 import { makeCompiled, PRIVATE_STATE_ID } from "./compiled.ts";
 import { getGasWallet } from "../wallet/local-wallet.ts";
+import { walletApi } from "../wallet/useWallet.ts";
 import { logEvent } from "../game/log-store.ts";
 
 // ── Wire types (identical to the old api/http.ts) ───────────────────────────
@@ -164,6 +165,62 @@ async function attachWithSecret(secret: Uint8Array): Promise<{ found: any }> {
   return { found };
 }
 
+// ── Connected-extension (DApp-connector) submit path ────────────────────────
+// SPIKE: only createGame/join route through here for now. The browser BUILDS +
+// PROVES a dust-less tx (against the local proof server); the connected
+// extension wallet (e.g. Lace) balances the dust, signs, and submits — so the
+// player pays their own gas on a hosted network where there's no local wallet.
+let connectorHandleP: Promise<{ providers: any; addr: string }> | null = null;
+async function attachConnector(): Promise<{ providers: any; addr: string }> {
+  if (connectorHandleP) return connectorHandleP;
+  connectorHandleP = (async () => {
+    const wapi = walletApi();
+    if (!wapi) throw new Error("no browser wallet connected");
+    const sh = await wapi.getShieldedAddresses();
+    const providers = buildConnectorProviders({
+      coinPublicKey: sh.shieldedCoinPublicKey as any,
+      encryptionPublicKey: sh.shieldedEncryptionPublicKey as any,
+    });
+    const addr = await arenaAddress();
+    // Seed the private state at PRIVATE_STATE_ID (zero secret is fine for
+    // create/join — the id commitment + roots are already in the args) so
+    // createUnprovenCallTx has a private state to read.
+    await findDeployedContract(providers as any, {
+      contractAddress: addr,
+      compiledContract: makeCompiled() as any,
+      privateStateId: PRIVATE_STATE_ID as any,
+      initialPrivateState: createNixNaxPrivateState(new Uint8Array(32)) as any,
+    } as any);
+    return { providers, addr };
+  })();
+  return connectorHandleP;
+}
+
+async function submitViaConnector(circuitId: string, args: unknown[]): Promise<void> {
+  const wapi = walletApi();
+  if (!wapi) throw new Error("no browser wallet connected");
+  const { providers, addr } = await attachConnector();
+  providers.privateStateProvider?.setContractAddress?.(addr);
+  logEvent(`${circuitId}: building + proving dust-less tx (local proof server)…`);
+  const unsub: any = await createUnprovenCallTx(providers, {
+    compiledContract: makeCompiled() as any,
+    contractAddress: addr as any,
+    circuitId: circuitId as any,
+    args: args as any,
+    privateStateId: PRIVATE_STATE_ID as any,
+  } as any);
+  const unproven = unsub.private?.unprovenTx ?? unsub.public?.unprovenTx ?? unsub.unprovenTx;
+  const proven: any = await providers.proofProvider.proveTx(unproven);
+  const hex = toHex(proven.serialize() as Uint8Array);
+  logEvent(`${circuitId}: proven — asking wallet to balance + submit (approve the prompt)…`);
+  const { tx } = await wapi.balanceUnsealedTransaction(hex, { payFees: true });
+  await wapi.submitTransaction(tx);
+  logEvent(`${circuitId}: submitted via connected wallet`);
+}
+
+// True when a browser-extension wallet is connected — route submits through it.
+const useConnector = (): boolean => walletApi() !== null;
+
 // ── On-chain state read (ported from relay /api/state) ──────────────────────
 async function readState(gameId: string): Promise<ContractState> {
   const { providers, addr } = await attach();
@@ -284,28 +341,38 @@ export const api = {
 
   createGame: (args: { gameId: string; idX: string; rootX: string; rootIdxX: string; rootRndX: string }) =>
     withLock(async () => {
-      const { found } = await attach();
-      const tx = await found.callTx.createGame(
+      const callArgs = [
         gid(args.gameId),
         fromHex(args.idX),
         { field: fieldBig(args.rootX) },
         { field: fieldBig(args.rootIdxX) },
         { field: fieldBig(args.rootRndX) },
-      );
-      return { ok: true as const, txId: txIdOf(tx), gameId: args.gameId };
+      ];
+      if (useConnector()) {
+        await submitViaConnector("createGame", callArgs);
+        return { ok: true as const, txId: undefined as string | undefined, gameId: args.gameId };
+      }
+      const { found } = await attach();
+      const tx = await found.callTx.createGame(...callArgs);
+      return { ok: true as const, txId: txIdOf(tx) as string | undefined, gameId: args.gameId };
     }),
 
   join: (args: { gameId: string; idO: string; rootO: string; rootIdxO: string; rootRndO: string }) =>
     withLock(async () => {
-      const { found } = await attach();
-      const tx = await found.callTx.joinGame(
+      const callArgs = [
         gid(args.gameId),
         fromHex(args.idO),
         { field: fieldBig(args.rootO) },
         { field: fieldBig(args.rootIdxO) },
         { field: fieldBig(args.rootRndO) },
-      );
-      return { ok: true as const, txId: txIdOf(tx) };
+      ];
+      if (useConnector()) {
+        await submitViaConnector("joinGame", callArgs);
+        return { ok: true as const, txId: undefined as string | undefined };
+      }
+      const { found } = await attach();
+      const tx = await found.callTx.joinGame(...callArgs);
+      return { ok: true as const, txId: txIdOf(tx) as string | undefined };
     }),
 
   state: (gameId: string) => readState(gameId),
