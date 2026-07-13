@@ -6,7 +6,7 @@ nixnax-level-db*
 nixnax-x-*
 nixnax-o-*
 nixnax-relay-db-*
-nixnax.undeployed.json
+nixnax.*.json
 # Local-stack PIDs + logs (created by `bun run stack:up`).
 .stack-pids.json
 .stack-logs/
@@ -44,4 +44,3 @@ video-build/*.png
 video-build/subs.ass
 video-build/cues.json
 video-build/filter_complex.txt
-nixnax.e2e.json
