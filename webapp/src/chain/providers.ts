@@ -26,6 +26,8 @@ import { CONSTANTS } from "../../../src/sdk/env.ts";
 import { NETWORK, STORAGE_PASSWORD, assertNetworkConfigured } from "./env.ts";
 import type { WalletBundle } from "../../../src/sdk/wallet.ts";
 import { ZK_ASSETS_BASE } from "./compiled.ts";
+import type { ConnectedAPI } from "../wallet/connector.ts";
+import { createConnectorWalletProviders } from "../wallet/connector-adapter.ts";
 
 const ttl = () => new Date(Date.now() + CONSTANTS.TTL_DURATION_MS);
 
@@ -85,46 +87,51 @@ export function buildBrowserProviders(opts: {
   };
 }
 
-// Wallet-LESS provider set for the connected-extension (DApp-connector) path.
-// The browser only BUILDS + PROVES the tx here; the extension wallet does the
-// dust balancing + signing + submit (via balanceUnsealedTransaction /
-// submitTransaction), so we don't have a local WalletBundle. balanceTx/submitTx
-// must never be called on this set — the connector handles those.
-function connectorAdapter(coinPublicKey: CoinPublicKey, encryptionPublicKey: EncPublicKey): WalletProvider & MidnightProvider {
-  return {
-    getCoinPublicKey: () => coinPublicKey,
-    getEncryptionPublicKey: () => encryptionPublicKey,
-    balanceTx(): Promise<FinalizedTransaction> {
-      throw new Error("connector path: balancing is done by the extension wallet, not the provider");
-    },
-    submitTx(): Promise<TransactionId> {
-      throw new Error("connector path: submission is done by the extension wallet, not the provider");
-    },
-  };
-}
-
-export function buildConnectorProviders(opts: {
-  coinPublicKey: CoinPublicKey;
-  encryptionPublicKey: EncPublicKey;
+// Provider set backed by a connected DApp-connector wallet (e.g. Lace). Mirrors
+// the reference midnight-wallet-dapp buildProvidersFromConnectedAPI: read the
+// wallet's own config (endpoints) + shielded address, wrap it into a
+// wallet/midnight provider, and let the normal `found.callTx.*` flow run — the
+// browser proves, the wallet balances the dust + signs + submits.
+export async function buildConnectorProviders(opts: {
+  api: ConnectedAPI;
   privateStateStoreName?: string;
   midnightDbName?: string;
-}): MidnightProviders {
+  initialSecret?: Uint8Array;
+}): Promise<MidnightProviders> {
   assertNetworkConfigured();
-  const adapter = connectorAdapter(opts.coinPublicKey, opts.encryptionPublicKey);
+  const config = await opts.api.getConfiguration();
+  const sh = await opts.api.getShieldedAddresses();
   const store = opts.privateStateStoreName ?? "nixnax-arena-connector";
   const zkConfigProvider = new FetchZkConfigProvider(ZK_BASE, fetch.bind(window));
+  const { walletProvider, midnightProvider } = createConnectorWalletProviders(
+    opts.api,
+    sh.shieldedCoinPublicKey,
+    sh.shieldedEncryptionPublicKey,
+  );
+  // Use the wallet's own endpoints so the dApp and wallet agree on the network;
+  // fall back to our build-time proof server if the wallet doesn't host one.
+  const rawPublicDataProvider = indexerPublicDataProvider(config.indexerUri, config.indexerWsUri);
+  const publicDataProvider = {
+    ...rawPublicDataProvider,
+    async queryZSwapAndContractState(contractAddress: any, queryConfig?: any) {
+      const result = await (rawPublicDataProvider as any).queryZSwapAndContractState(contractAddress, queryConfig);
+      if (!result) return result;
+      const [zswapChainState, contractState, ledgerParameters] = result;
+      return [zswapChainState.postBlockUpdate(new Date()), contractState, ledgerParameters];
+    },
+  };
   return {
     privateStateProvider: levelPrivateStateProvider({
       midnightDbName: opts.midnightDbName ?? "nixnax-web-db-connector",
       privateStateStoreName: store,
       signingKeyStoreName: `${store}-signing-keys`,
       privateStoragePasswordProvider: async () => STORAGE_PASSWORD,
-      accountId: "nixnax-connector",
+      accountId: sh.shieldedAddress,
     } as any),
-    publicDataProvider: indexerPublicDataProvider(NETWORK.indexer, NETWORK.indexerWS),
+    publicDataProvider: publicDataProvider as any,
     zkConfigProvider: zkConfigProvider as any,
-    proofProvider: httpClientProofProvider(NETWORK.proofServer, zkConfigProvider as any),
-    walletProvider: adapter,
-    midnightProvider: adapter,
+    proofProvider: httpClientProofProvider(config.proverServerUri || NETWORK.proofServer, zkConfigProvider as any),
+    walletProvider,
+    midnightProvider,
   };
 }
