@@ -366,23 +366,35 @@ Same as above, plus:
 
 ## Mode C — Preview network
 
-Instead of running a local chain (skip Steps 4–5's stack; keep a **proof
-server** running — browsers still need one):
+Instead of running a local chain (skip Step 4's node/indexer; keep a **proof
+server** running — deploy and browsers both need one, e.g. `bun run stack:up`
+then ignore its node/indexer, or run just a proof-server 8.1.0 at :6300):
 
-1. Root `.env` additions (see [`.env.example`](../.env.example)):
-   `MIDNIGHT_NETWORK_ID=preview`, a **funded** `MIDNIGHT_WALLET_SEED`
-   (enough NIGHT for 17 transactions), the preview node/indexer URLs, and
-   `MIDNIGHT_DEPLOYMENT_FILE=nixnax.preview.json` (so the local dev
-   record isn't overwritten).
-2. `bun run deploy` — it prints the `VITE_ARENA_ADDRESS_PREVIEW=…` line to
-   add to `.env`.
-3. Webapp build with `VITE_NETWORK_ID=preview` + the `VITE_*_PREVIEW`
-   endpoint rows. TLS is effectively mandatory (public users).
-4. Players need a Midnight browser-extension wallet set to preview and their
+1. Deploy to preview with a **funded, DUST-registered** wallet (enough NIGHT
+   for the 17 deploy transactions):
+
+   ```bash
+   MN_ENV=preview MN_MNEMONIC="word1 word2 … word24" bun run deploy:net
+   # or from a raw hex seed:  MN_ENV=preview MN_SEED=<hex> bun run deploy:net
+   ```
+
+   `deploy:net` ([`scripts/deploy-network.ts`](../scripts/deploy-network.ts))
+   resolves the preview endpoints, runs the full 17-tx deploy, caches the
+   address in `nixnax.preview.json`, and **writes the address + node/indexer
+   URLs into the root `.env`** as `VITE_ARENA_ADDRESS_PREVIEW`,
+   `VITE_INDEXER_URL_PREVIEW`, `VITE_INDEXER_WS_URL_PREVIEW`,
+   `VITE_NODE_URL_PREVIEW`. Override endpoints with `MN_INDEXER_URL` /
+   `MN_NODE_URL` if the live network runs a newer indexer API path.
+2. Webapp build: set `VITE_NETWORK_ID=preview` and a **public**
+   `VITE_PROOF_SERVER_URL_PREVIEW` (browsers need a reachable proof server;
+   `deploy:net` does not write this, since the deploy-time one is local). TLS
+   is effectively mandatory (public users).
+3. Players need a Midnight browser-extension wallet set to preview and their
    own gas — the session wallet/faucet is disabled off the dev chain.
-5. Caveats: verify the exact network-id string the SDK expects for preview
-   before burning the 17 deploy transactions, and note the extension-wallet
-   connector is the least-exercised path in the repo.
+4. Caveats: `mainnet`/`testnet`/`qanet` work the same way (`MN_ENV=<net>`) but
+   confirm the network is live and the indexer API path is right before burning
+   the 17 deploy transactions; the extension-wallet connector is the
+   least-exercised path in the repo.
 
 ---
 
