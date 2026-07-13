@@ -36,6 +36,8 @@ bun install
 
 # 2. Compile the Compact contract  ->  src/contract/managed/
 bun run compact
+#    (optional) confirm your keys match the deployed contract — see below:
+#    bun run keys:verify
 
 # 3. Start the local Midnight stack (Docker) and wait for the containers healthy.
 #    node :9944   indexer :8088   proof server :6300
@@ -227,6 +229,8 @@ So the defect lives in the fee layer — the wallet SDK's estimate or the node's
 > | `@midnight-ntwrk/compact-js` | 2.5.1 | | `@midnight-ntwrk/wallet-sdk` (set) | 1.2.0 |
 >
 > Preview network components: node 1.0.0, indexer 4.3.3, proof server 8.1.0. `bun run stack:up` runs exactly these versions locally from the official public Docker images (see [`deploy/docker`](deploy/docker/README.md)).
+>
+> **Reproducible keys.** `compact compile +0.31.1` is deterministic: the same compiler + source produce byte-identical prover/verifier keys. So a frontend built from this source generates proofs that verify against the verifier keys installed on-chain at deploy. `bun run keys:verify` checksums your compiled `src/contract/managed/keys/*` against the committed manifest [`src/contract/keys.sha256`](src/contract/keys.sha256) (the keys deployed on preview) and fails on any drift — run it after `bun run compact` to confirm your build matches the live contract.
 
 ---
 

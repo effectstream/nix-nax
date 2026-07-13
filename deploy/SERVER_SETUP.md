@@ -128,7 +128,14 @@ sudo -iu nixnax bash -lc 'cd /srv/nixnax && bun run compact'
 ```bash
 sudo -iu nixnax bash -lc 'ls /srv/nixnax/src/contract/managed/keys/*.prover | wc -l'
 # expect: 16
+# Confirm the compiled keys match the deployed contract (deterministic build):
+sudo -iu nixnax bash -lc 'cd /srv/nixnax && bun run keys:verify'
+# expect: ✓ all 32 keys match … — build is consistent with the deployed contract.
 ```
+
+If `keys:verify` fails, you compiled with the wrong compiler — `compact update
+0.31.1` and recompile. Serving a frontend whose keys don't match means its
+proofs will be rejected by the on-chain verifier keys.
 
 ---
 
