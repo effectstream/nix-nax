@@ -60,11 +60,39 @@ export async function connect(wallet: InitialAPI): Promise<void> {
       logEvent(`! wallet on network "${cfg.networkId}" but the app is on "${NETWORK_ID}" — switch the wallet's network and reconnect`);
       return;
     }
-    const [addr, dust] = await Promise.all([
-      api.getUnshieldedAddress().catch(() => null),
-      api.getDustBalance().catch(() => null),
-    ]);
+    // Address/dust are display data — a failure must not block the connection,
+    // but it must be VISIBLE (a silent null makes the button fall back to the
+    // extension name and hides real problems, e.g. an insecure http:// origin
+    // degrading the extension API). Log the reason and retry once.
+    const readDisplayData = async (label: string) => {
+      const [addr, dust] = await Promise.all([
+        api.getUnshieldedAddress().catch((e: Error) => {
+          logEvent(`! wallet getUnshieldedAddress failed${label}: ${e.message}`);
+          return null;
+        }),
+        api.getDustBalance().catch((e: Error) => {
+          logEvent(`! wallet getDustBalance failed${label}: ${e.message}`);
+          return null;
+        }),
+      ]);
+      return { addr, dust };
+    };
+    let { addr, dust } = await readDisplayData("");
     set({ mode: "wallet", api, name: wallet.name, address: addr?.unshieldedAddress ?? null, dust, connecting: false });
+    if (!addr || !dust) {
+      // One delayed retry — extensions can briefly refuse data right after
+      // connect (still unlocking/syncing).
+      setTimeout(() => {
+        void readDisplayData(" (retry)").then((r) => {
+          if (r.addr || r.dust) {
+            set({
+              ...(r.addr ? { address: r.addr.unshieldedAddress } : {}),
+              ...(r.dust ? { dust: r.dust } : {}),
+            });
+          }
+        });
+      }, 3000);
+    }
     // Drop any cached arena handle built for the previous wallet mode so the
     // next on-chain action attaches via this connection. (Dynamic import:
     // arena.ts statically imports this module — avoid the cycle.)
