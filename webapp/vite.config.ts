@@ -4,8 +4,21 @@ import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
 import { nodePolyfills } from "vite-plugin-node-polyfills";
 import { createReadStream, existsSync, statSync } from "node:fs";
+import { execSync } from "node:child_process";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+
+// Version stamp baked into the bundle ("app loaded (<sha>)") so the browser log
+// proves which code is actually running — kills HMR/stale-cache confusion.
+function gitVersion(): string {
+  try {
+    const sha = execSync("git rev-parse --short HEAD", { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+    const dirty = execSync("git status --porcelain", { stdio: ["ignore", "pipe", "ignore"] }).toString().trim() ? "-dirty" : "";
+    return sha + dirty;
+  } catch {
+    return "unknown";
+  }
+}
 
 // The runtime/value-type packages must be a SINGLE instance: they define
 // StateValue / ContractState / Transaction, which cross module boundaries and
@@ -52,6 +65,9 @@ export default defineConfig({
   // Read .env files from the repo root, so one shared .env holds both the
   // server-side MIDNIGHT_* vars and the browser VITE_* vars (see .env.example).
   envDir: "..",
+  define: {
+    __APP_VERSION__: JSON.stringify(gitVersion()),
+  },
   plugins: [
     react(),
     wasm(),

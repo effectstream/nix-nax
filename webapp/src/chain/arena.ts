@@ -143,7 +143,7 @@ async function providersForMode(opts?: { privateStateStoreName?: string; midnigh
 let handleP: Promise<{ found: any; providers: any; addr: string }> | null = null;
 async function attach(): Promise<{ found: any; providers: any; addr: string }> {
   if (handleP) return handleP;
-  handleP = (async () => {
+  const p = (async () => {
     const providers = await providersForMode();
     const addr = await arenaAddress();
     const found = await findDeployedContract(providers as any, {
@@ -154,7 +154,13 @@ async function attach(): Promise<{ found: any; providers: any; addr: string }> {
     } as any);
     return { found, providers, addr };
   })();
-  return handleP;
+  // NEVER cache a rejection: Home polls saved sessions at page load, BEFORE a
+  // wallet is connected — on a hosted network that first attach fails, and a
+  // cached rejection would poison every later action (create/join after the
+  // user connects). Retry fresh on the next call instead.
+  p.catch(() => { if (handleP === p) handleP = null; });
+  handleP = p;
+  return p;
 }
 
 // Drop the cached handle so the next action re-attaches — e.g. after the faucet

@@ -65,6 +65,10 @@ export async function connect(wallet: InitialAPI): Promise<void> {
       api.getDustBalance().catch(() => null),
     ]);
     set({ mode: "wallet", api, name: wallet.name, address: addr?.unshieldedAddress ?? null, dust, connecting: false });
+    // Drop any cached arena handle built for the previous wallet mode so the
+    // next on-chain action attaches via this connection. (Dynamic import:
+    // arena.ts statically imports this module — avoid the cycle.)
+    void import("../chain/arena.ts").then((m) => m.resetArena()).catch(() => {});
     logEvent(`wallet: connected ${wallet.name}${dust ? ` — dust ${dust.balance}/${dust.cap}` : ""}`);
     if (dust && dust.balance === 0n) logEvent("⚠️ wallet has 0 dust — fund it to pay for gas");
   } catch (e) {
