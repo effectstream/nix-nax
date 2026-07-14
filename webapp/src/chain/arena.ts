@@ -269,9 +269,16 @@ export async function winTokenRaw(): Promise<string> {
 // balance — the win-token is the only shielded token this dApp ever mints.
 export async function readWinBalance(): Promise<number> {
   try {
-    const bundle = await getGasWallet();
-    const st: any = await firstValueFrom((bundle as any).wallet.state());
-    const balances: Record<string, bigint> = st?.shielded?.balances ?? {};
+    let balances: Record<string, bigint>;
+    const wapi = walletApi();
+    if (wapi) {
+      // Connected extension wallet: ask it directly for shielded balances.
+      balances = await wapi.getShieldedBalances();
+    } else {
+      const bundle = await getGasWallet();
+      const st: any = await firstValueFrom((bundle as any).wallet.state());
+      balances = st?.shielded?.balances ?? {};
+    }
     const raw = await winTokenRaw();
     const keys = Object.keys(balances);
     let n = balances[raw];
