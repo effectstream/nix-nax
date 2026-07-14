@@ -275,9 +275,10 @@ export async function winTokenRaw(): Promise<string> {
 }
 
 // How many win-tokens the active gas wallet holds (= wins). Reads the live
-// wallet state. Robust to the exact balances-key shape: prefers the precisely
-// derived raw key, else falls back to the sole custom (non-native) shielded
-// balance — the win-token is the only shielded token this dApp ever mints.
+// wallet state and reports EXACTLY the derived win-token key. No sum-the-rest
+// fallback: that heuristic assumed the dev session wallet (win-token is its
+// only shielded token) — against a real connected wallet it happily summed all
+// the player's unrelated shielded tokens into a nonsense "wins" figure.
 export async function readWinBalance(): Promise<number> {
   try {
     let balances: Record<string, bigint>;
@@ -292,13 +293,7 @@ export async function readWinBalance(): Promise<number> {
     }
     const raw = await winTokenRaw();
     const keys = Object.keys(balances);
-    let n = balances[raw];
-    if (n == null) {
-      // Fallback: sum non-native shielded balances (native shielded tag = 'shielded').
-      let sum = 0n;
-      for (const [k, v] of Object.entries(balances)) if (k !== "shielded") sum += v ?? 0n;
-      n = sum;
-    }
+    const n = balances[raw] ?? 0n;
     logEvent(`wins: ${n} (raw ${raw.slice(0, 16)}…; shielded keys=[${keys.map((k) => k.slice(0, 10)).join(", ")}])`);
     return Number(n ?? 0n);
   } catch (e) {
