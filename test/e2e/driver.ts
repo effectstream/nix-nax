@@ -90,6 +90,8 @@ export interface GameHandle {
   gameId: Uint8Array;
   contractAddress: string;
   settleChunk(baseTurn: number, moves: ScriptMove[], untilTime: bigint): Promise<string>;
+  // Same, but through a specific settle entry point (2 → settle2, 16 → settle16).
+  settleChunkVariant(baseTurn: number, moves: ScriptMove[], variant: 2 | 8 | 16, untilTime: bigint): Promise<string>;
   claimResult(as?: "x" | "o"): Promise<string>;
   startTimeoutAsX(untilTime: bigint): Promise<string>;
   claimTimeout(): Promise<string>;
@@ -120,6 +122,14 @@ export async function openGame(pair: TestPair): Promise<GameHandle> {
     async settleChunk(baseTurn, moves, untilTime) {
       const c = packChunk(pair, baseTurn, moves);
       const t: any = await submitWithRetry("settle", () => (a.found as any).callTx.settle(
+        pair.gameId, c.nMoves, c.parities, c.kinds, c.cells, c.sizes, c.secrets, c.paths, untilTime,
+      ));
+      return t.public.txId as string;
+    },
+    async settleChunkVariant(baseTurn, moves, variant, untilTime) {
+      const name = variant === 8 ? "settle" : (`settle${variant}` as const);
+      const c = packChunk(pair, baseTurn, moves, variant);
+      const t: any = await submitWithRetry(name, () => (a.found as any).callTx[name](
         pair.gameId, c.nMoves, c.parities, c.kinds, c.cells, c.sizes, c.secrets, c.paths, untilTime,
       ));
       return t.public.txId as string;

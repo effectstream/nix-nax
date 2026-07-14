@@ -158,7 +158,7 @@ export function useChainActions(
       if (chunks.length === 0) { logEvent("settle: nothing to extend"); return; }
       logEvent(`settle: ${session.committedTurns - from} move(s) in ${chunks.length} chunk(s)…`);
       for (let i = 0; i < chunks.length; i++) {
-        setStatus(`Proving settle chunk ${i + 1}/${chunks.length} — the settle proof is the big one (a few minutes per chunk). Approve each tx in your wallet…`);
+        setStatus(`Proving settle chunk ${i + 1}/${chunks.length} (settle${chunks[i].variant}, ${chunks[i].nMoves} move${chunks[i].nMoves === 1 ? "" : "s"}) — bigger chunks take a few minutes. Approve each tx in your wallet…`);
         // Fresh timestamp PER CHUNK, taken right before proving starts: the
         // contract checks untilTime > blockTime + minWindowSecs when the tx
         // LANDS, and each chunk spends minutes in proving + wallet approval. A
