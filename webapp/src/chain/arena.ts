@@ -355,11 +355,15 @@ export const api = {
     withLock(async () => {
       // Attach with the caller's secret — claimResult reads the localSecret witness
       // (via callerMark) to enforce winner-only finalisation of a decided game — then
-      // mint the win-token to the submitting gas wallet (recipient = its shielded coin
-      // public key). Draws finalise with no mint; the recipient is then unused.
+      // mint the win-token to the SUBMITTING wallet's shielded coin public key: the
+      // connected extension wallet when one is active, else the local gas wallet.
+      // Draws finalise with no mint; the recipient is then unused.
       const { found } = await attachWithSecret(fromHex(secret));
-      const wallet = await getGasWallet();
-      const recipient = { bytes: encodeCoinPublicKey((wallet as any).zswapSecretKeys.coinPublicKey) };
+      const wapi = walletApi();
+      const coinPk = wapi
+        ? (await wapi.getShieldedAddresses()).shieldedCoinPublicKey
+        : ((await getGasWallet()) as any).zswapSecretKeys.coinPublicKey;
+      const recipient = { bytes: encodeCoinPublicKey(coinPk as any) };
       const tx = await found.callTx.claimResult(gid(gameId), recipient);
       return { ok: true as const, txId: txIdOf(tx) };
     }),
