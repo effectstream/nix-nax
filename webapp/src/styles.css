@@ -211,6 +211,10 @@ input[type="text"]::placeholder { color: #5d6b86; }
 .wallet-btn.connected { font-family: ui-monospace, monospace; font-size: 12px; }
 .wallet-btn .wallet-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wallet-btn .wallet-wins { flex-shrink: 0; font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 999px; background: rgba(255, 206, 107, 0.14); border: 1px solid rgba(255, 206, 107, 0.35); }
+
+/* In-flight transaction status ("proving chunk 1/3 — takes minutes…") */
+.tx-status { font-size: 12px; line-height: 1.5; padding: 8px 10px; border-radius: 10px; background: rgba(122, 162, 255, 0.1); border: 1px solid rgba(122, 162, 255, 0.3); animation: txPulse 1.6s ease-in-out infinite; }
+@keyframes txPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
 .wallet-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: #5d6b86; }
 .wallet-dot.wallet { background: var(--good); box-shadow: 0 0 8px rgba(84, 224, 154, 0.7); }
 .wallet-dot.local { background: var(--warn); box-shadow: 0 0 8px rgba(255, 206, 107, 0.6); }

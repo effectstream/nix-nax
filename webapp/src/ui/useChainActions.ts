@@ -14,6 +14,9 @@ const hex = (b: Uint8Array) => Array.from(b).map((x) => x.toString(16).padStart(
 
 export interface ChainActions {
   busy: string | null;
+  // What the in-flight action is doing right now ("proving chunk 1/3…") —
+  // ZK proving takes minutes, so the UI must say why it's waiting.
+  status: string | null;
   error: string | null;
   settled: boolean;
   canSettle: boolean;
@@ -46,6 +49,7 @@ export function useChainActions(
   onRefresh: () => void,
 ): ChainActions {
   const [busy, setBusy] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Status enum: 0=halfOpen, 1=inProgress, 2=settled.
@@ -103,6 +107,7 @@ export function useChainActions(
   const wrap = (label: string, fn: () => Promise<unknown>) => () => {
     setError(null);
     setBusy(label);
+    setStatus("Building + proving the transaction — approve in your wallet when prompted…");
     void (async () => {
       try {
         await fn();
@@ -112,6 +117,7 @@ export function useChainActions(
         logEvent(`ERROR ${label}: ${msg}`);
       } finally {
         setBusy(null);
+        setStatus(null);
         onRefresh();
       }
     })();
@@ -120,7 +126,7 @@ export function useChainActions(
   const side = (): "x" | "o" => (session.role === "x" ? "o" : "x"); // fraud is by the opponent
 
   return {
-    busy, error, settled,
+    busy, status, error, settled,
     canSettle, canClaimResult, canStartTimeout, canClaimTimeout,
     canProveT, canProveI, canProveR, canProveP,
     canChallengeRoll, canAnswerRoll, canClaimRoll,
@@ -135,6 +141,7 @@ export function useChainActions(
       if (chunks.length === 0) { logEvent("settle: nothing to extend"); return; }
       logEvent(`settle: ${session.committedTurns - from} move(s) in ${chunks.length} chunk(s)…`);
       for (let i = 0; i < chunks.length; i++) {
+        setStatus(`Proving settle chunk ${i + 1}/${chunks.length} — the settle proof is the big one (a few minutes per chunk). Approve each tx in your wallet…`);
         const r = await api.settle({ gameId: session.gameId, secret: hex(session.keys.secret), ...chunks[i] });
         logEvent(`settle chunk ${i + 1}/${chunks.length}: tx ${r.txId}`);
       }

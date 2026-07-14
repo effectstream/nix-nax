@@ -135,6 +135,11 @@ export async function buildConnectorProviders(opts: {
     } as any),
     publicDataProvider: publicDataProvider as any,
     zkConfigProvider: zkConfigProvider as any,
+    // The WALLET's configured proof server is authoritative — the prover sees
+    // private witness data, so a dApp that could steer proving to its own URL
+    // would be an exfiltration vector. Users pick their prover in the wallet
+    // (e.g. Lace settings → localhost:6300 for a self-hosted one). Our VITE_
+    // value is only the fallback for wallets that don't supply one.
     proofProvider: httpClientProofProvider(config.proverServerUri || NETWORK.proofServer, zkConfigProvider as any),
     walletProvider,
     midnightProvider,

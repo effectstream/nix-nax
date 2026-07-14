@@ -41,17 +41,17 @@ export function startAiOpponent(gameId: string): AiHandle {
   let client: RelayClient | null = null;
   const log = (m: string) => logEvent(`AI(BLUE): ${m}`);
 
-  // Restore the AI's O session if we've played this game before, else mint one.
-  const raw = localStorage.getItem(aiKey(gameId));
-  const session = raw
-    ? PlayerSession.restore(JSON.parse(raw) as SerializedSession)
-    : new PlayerSession("o", gameId, generatePlayerKeys("o", fromHex(gameId)), null);
+  // The AI's O session is created in the async bootstrap below, NOT here: the
+  // first-run key generation builds three 128-turn Merkle trees (~10-20s of
+  // synchronous crypto) and would freeze the just-mounted game view black.
+  let session: PlayerSession | null = null;
   // The serialized session is >1 MB, so storage can fill after a few practice
   // games. On a quota error, evict OTHER games' AI blobs (keeping this one) and
   // retry; if it still won't fit, degrade gracefully — the AI keeps playing this
   // sitting, it just won't survive a page reload.
   const key = aiKey(gameId);
   const persist = () => {
+    if (!session) return;
     const data = JSON.stringify(session.serialise());
     try {
       localStorage.setItem(key, data);
@@ -68,14 +68,12 @@ export function startAiOpponent(gameId: string): AiHandle {
       log("storage full — AI state won't survive a page reload this session");
     }
   };
-  if (!raw) persist();
-
   const send = (type: "intent" | "random" | "move", payload: unknown) =>
     client?.send({ type, addr: gameId, payload } as never);
 
   // Take a turn (or kick off our ceremony) whenever it's our move.
   const actIfReady = () => {
-    if (stopped || !client) return;
+    if (stopped || !client || !session) return;
     const ph = session.turnPhase;
     if (ph.phase === "myIntent") {
       const it = session.myIntent();
@@ -104,7 +102,7 @@ export function startAiOpponent(gameId: string): AiHandle {
   };
 
   const onMessage = (msg: { type: string; payload?: unknown }) => {
-    if (stopped) return;
+    if (stopped || !session) return;
     if (msg.type === "intent") {
       const r = session.receiveIntent(decodeIntent(msg.payload as never));
       if (!r.ok) { log(`! intent rejected: ${r.reason}`); return; }
@@ -123,9 +121,26 @@ export function startAiOpponent(gameId: string): AiHandle {
     }
   };
 
-  // Bootstrap: join on-chain if needed, learn X's commitments, then connect WS.
+  // Bootstrap: mint/restore the O session, join on-chain if needed, learn X's
+  // commitments, then connect WS.
   (async () => {
     try {
+      // Let the just-mounted game view PAINT before the synchronous Merkle-tree
+      // build freezes the main thread — without this the player stares at a
+      // black screen for the whole key generation.
+      await new Promise((r) => setTimeout(r, 120));
+      if (stopped) return;
+      const raw = localStorage.getItem(key);
+      if (raw) {
+        session = PlayerSession.restore(JSON.parse(raw) as SerializedSession);
+      } else {
+        log("generating keys (three Merkle trees) — the board may freeze for a few seconds…");
+        await new Promise((r) => setTimeout(r, 50)); // flush the log/paint first
+        session = new PlayerSession("o", gameId, generatePlayerKeys("o", fromHex(gameId)), null);
+        persist();
+        log("keys ready");
+      }
+      if (stopped) return;
       let st = await api.state(gameId);
       if (stopped) return;
       if (st.status === 0) {
@@ -184,7 +199,7 @@ export function startAiOpponent(gameId: string): AiHandle {
   // periodically re-send the intent (idempotent) — covers a reveal lost to the
   // commitments race or a reload that dropped the in-tab relay history.
   const nudge = setInterval(() => {
-    if (!stopped && client && session.turnPhase.phase === "awaitRandom") actIfReady();
+    if (!stopped && client && session?.turnPhase.phase === "awaitRandom") actIfReady();
   }, 20_000);
 
   return {

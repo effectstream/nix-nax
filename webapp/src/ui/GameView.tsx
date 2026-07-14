@@ -445,6 +445,7 @@ export default function GameView({ session, onLeave }: Props) {
                 <button className="btn-o btn-block" disabled={!actions.canClaimResult || actions.busy !== null} onClick={actions.claimResult}>
                   {actions.busy === "Redeem" ? "Redeeming…" : iWon ? "Redeem — mint win token 🏆" : "Redeem"}
                 </button>
+                {actions.busy && actions.status && <div className="tx-status">⏳ {actions.status}</div>}
                 {actions.error && <div className="error">{actions.error}</div>}
                 <button className="back-link" onClick={() => setWinDismissed(true)}>Hide — view the board</button>
               </div>
