@@ -22,12 +22,15 @@ export const MAX_TURNS = 128;
 // pre-1.0 node).
 export const SETTLE_CHUNK = 8;
 // The contract exports one settle entry point per chunk size (settle2 /
-// settle / settle16 — one generic circuit monomorphized per size). Descending;
+// settle / settle11 — one generic circuit monomorphized per size). Descending;
 // the chunker takes the largest while more moves remain, then the smallest
 // variant that fits the tail — fewer txs for long histories, a much smaller
-// (faster-proving) circuit for short tails. MUST match the exported variants
-// in NixNaxArena.compact.
-export const SETTLE_VARIANTS = [16, 8, 2] as const;
+// (faster-proving) circuit for short tails. 11 is the LARGEST chunk the node
+// accepts: the circuit must stay k=17 (settle12 crosses to k=18 and the node
+// rejects the call at dispatch — 1010 Custom(168), verification weight over
+// the per-tx budget; measured on node 1.0.0). MUST match the exported
+// variants in NixNaxArena.compact.
+export const SETTLE_VARIANTS = [11, 8, 2] as const;
 
 // Minimum on-chain challenge / timeout windows, in the chain's block-time unit
 // (seconds). Enforced in-circuit by settle (challengeUntil) and startTimeout

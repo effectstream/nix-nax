@@ -1615,8 +1615,9 @@ describe("malformed inputs: forged leaves & stale status", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Settle variants: settle2 / settle16 (one generic settleImpl<#N>, monomorphic
-// entry points). Every rule assert lives in the shared generic body, so each
+// Settle variants: settle2 / settle11 (one generic settleImpl<#N>, monomorphic
+// entry points; 11 is the largest chunk that stays k=17 — the node rejects
+// k=18 calls). Every rule assert lives in the shared generic body, so each
 // variant must behave exactly like `settle` — these tests pin that down, plus
 // the per-variant nMoves bound.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1634,7 +1635,7 @@ function settleVariant(
   pair: TestPair,
   baseTurn: number,
   moves: ScriptMove[],
-  variant: 2 | 8 | 16,
+  variant: 2 | 8 | 11,
   opts: { time?: number; until?: bigint; nMovesOverride?: bigint } = {},
 ) {
   const c = packChunk(pair, baseTurn, moves, variant);
@@ -1645,7 +1646,7 @@ function settleVariant(
   return res.context.currentQueryContext.state;
 }
 
-describe("settle variants: settle2 / settle16", () => {
+describe("settle variants: settle2 / settle11", () => {
   test("settle2 commits a 2-move chunk", () => {
     const pair = playersC();
     const { contract, privateState, state } = setup(pair);
@@ -1666,29 +1667,33 @@ describe("settle variants: settle2 / settle16", () => {
     expect(topAt(l, pair, 5)).toBe(1); // turn 8: X on cell 5
   });
 
-  test("settle16 commits 16 moves in ONE call, win landing on the final move", () => {
+  test("settle11 commits 11 moves in ONE call", () => {
     const pair = playersC();
     const { contract, privateState, state } = setup(pair);
-    const s1 = settleVariant(contract, state, privateState, pair, 0, SIXTEEN, 16);
+    const s1 = settleVariant(contract, state, privateState, pair, 0, SIXTEEN.slice(0, 11), 11);
     const d = dynOf(led(s1), pair);
-    expect(Number(d.committedTurns)).toBe(16);
-    expect(d.winner).toBe(Winner.o); // row3 + col3 complete at turn 15
+    expect(Number(d.committedTurns)).toBe(11);
+    expect(d.winner).toBe(Winner.none); // SIXTEEN only wins on its 16th move
   });
 
-  test("settle16 result is identical to the same moves via two settle(8) calls", () => {
+  test("mixed variants (settle11 + settle) equal two settle(8) calls, win included", () => {
     const pair = playersC();
     const a = setup(pair);
     const b = setup(pair);
-    const via16 = settleVariant(a.contract, a.state, a.privateState, pair, 0, SIXTEEN, 16);
+    // Path A: 16 moves as settle11 + settle(8, padded 5-move tail).
+    let viaMixed = settleVariant(a.contract, a.state, a.privateState, pair, 0, SIXTEEN.slice(0, 11), 11, { time: 1000 });
+    viaMixed = settleVariant(a.contract, viaMixed, a.privateState, pair, 11, SIXTEEN.slice(11), 8, { time: 1100 });
+    // Path B: the same 16 moves as two settle(8) chunks.
     const via8 = settleChunk(b.contract, b.state, b.privateState, pair, 0, SIXTEEN, { time: 1000 });
-    const l16 = led(via16);
+    const lM = led(viaMixed);
     const l8 = led(via8);
-    expect(Number(dynOf(l16, pair).committedTurns)).toBe(Number(dynOf(l8, pair).committedTurns));
-    expect(dynOf(l16, pair).winner).toBe(dynOf(l8, pair).winner);
-    for (let c = 0; c < 16; c++) expect(topAt(l16, pair, c)).toBe(topAt(l8, pair, c));
+    expect(Number(dynOf(lM, pair).committedTurns)).toBe(Number(dynOf(l8, pair).committedTurns));
+    expect(dynOf(lM, pair).winner).toBe(dynOf(l8, pair).winner);
+    expect(dynOf(lM, pair).winner).toBe(Winner.o); // win on the final move survives the mix
+    for (let c = 0; c < 16; c++) expect(topAt(lM, pair, c)).toBe(topAt(l8, pair, c));
     // Same packed action log entry per turn.
     for (let t = 0; t < 16; t++) {
-      expect(Number(l16.actionLogs.lookup(pair.gameId).lookup(BigInt(t))))
+      expect(Number(lM.actionLogs.lookup(pair.gameId).lookup(BigInt(t))))
         .toBe(Number(l8.actionLogs.lookup(pair.gameId).lookup(BigInt(t))));
     }
   });
@@ -1701,22 +1706,22 @@ describe("settle variants: settle2 / settle16", () => {
     ).toThrow(/chunk too large/);
   });
 
-  test("settle16 rejects an empty chunk", () => {
+  test("settle11 rejects an empty chunk", () => {
     const pair = playersC();
     const { contract, privateState, state } = setup(pair);
     expect(() =>
-      settleVariant(contract, state, privateState, pair, 0, [], 16, { nMovesOverride: 0n }),
+      settleVariant(contract, state, privateState, pair, 0, [], 11, { nMovesOverride: 0n }),
     ).toThrow(/empty chunk/);
   });
 
-  test("rule asserts live in every variant: bad token path rejected by settle16", () => {
+  test("rule asserts live in every variant: bad token path rejected by settle11", () => {
     const pair = playersC();
     const { contract, privateState, state } = setup(pair);
-    const c = packChunk(pair, 0, SIXTEEN.slice(0, 2), 16);
+    const c = packChunk(pair, 0, SIXTEEN.slice(0, 2), 11);
     c.paths[0] = pair.x.token.pathFor(0, KIND_PLACE, 1, 0); // path for a DIFFERENT action
     const ctx = newCircuitCtx(state, privateState, 1000);
     expect(() =>
-      call(contract, "settle16", ctx, pair.gameId, c.nMoves, c.parities, c.kinds, c.cells, c.sizes, c.secrets, c.paths, 5000n),
+      call(contract, "settle11", ctx, pair.gameId, c.nMoves, c.parities, c.kinds, c.cells, c.sizes, c.secrets, c.paths, 5000n),
     ).toThrow(/invalid one-time token/);
   });
 

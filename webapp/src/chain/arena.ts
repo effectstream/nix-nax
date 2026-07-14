@@ -55,7 +55,7 @@ export interface SettleChunkBody {
   gameId: string;
   secret: string;
   // Which settle entry point this chunk targets (array lengths must match):
-  // 2 → settle2, 8 → settle, 16 → settle16. Absent = 8 (legacy callers).
+  // 2 → settle2, 8 → settle, 11 → settle11. Absent = 8 (legacy callers).
   variant?: number;
   nMoves: number;
   parities: number[];
@@ -343,10 +343,10 @@ export const api = {
       const variant = body.variant ?? 8;
       const entry =
         variant === 2 ? found.callTx.settle2 :
-        variant === 16 ? found.callTx.settle16 :
+        variant === 11 ? found.callTx.settle11 :
         found.callTx.settle;
-      if (variant !== 2 && variant !== 8 && variant !== 16) {
-        throw new Error(`unknown settle variant ${variant} (expected 2, 8, or 16)`);
+      if (variant !== 2 && variant !== 8 && variant !== 11) {
+        throw new Error(`unknown settle variant ${variant} (expected 2, 8, or 11)`);
       }
       if (body.parities.length !== variant) {
         throw new Error(`settle${variant === 8 ? "" : variant}: payload arrays must have length ${variant}`);

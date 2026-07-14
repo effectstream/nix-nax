@@ -90,8 +90,8 @@ export interface GameHandle {
   gameId: Uint8Array;
   contractAddress: string;
   settleChunk(baseTurn: number, moves: ScriptMove[], untilTime: bigint): Promise<string>;
-  // Same, but through a specific settle entry point (2 → settle2, 16 → settle16).
-  settleChunkVariant(baseTurn: number, moves: ScriptMove[], variant: 2 | 8 | 16, untilTime: bigint): Promise<string>;
+  // Same, but through a specific settle entry point (2 → settle2, 11 → settle11).
+  settleChunkVariant(baseTurn: number, moves: ScriptMove[], variant: 2 | 8 | 11, untilTime: bigint): Promise<string>;
   claimResult(as?: "x" | "o"): Promise<string>;
   startTimeoutAsX(untilTime: bigint): Promise<string>;
   claimTimeout(): Promise<string>;
