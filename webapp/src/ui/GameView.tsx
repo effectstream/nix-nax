@@ -64,6 +64,12 @@ export default function GameView({ session, onLeave }: Props) {
   const relayRef = useRef<RelayClient | null>(null);
   const prevChainRef = useRef<ContractState | null>(null);
   const lastWsRef = useRef<string>("");
+  // Relay messages that arrived BEFORE the chain poll delivered the opponent's
+  // commitments (intent/random/move all need them). On a hosted network the
+  // chain read can lose that race — queue and replay instead of dropping, else
+  // the opponent's first roll intent vanishes and the game hangs on "rolling".
+  const pendingMsgsRef = useRef<unknown[]>([]);
+  const handleMsgRef = useRef<((msg: any) => void) | null>(null);
 
   // Single entry point for chain state so every transition is logged (to console).
   const applyChain = (s: ContractState) => {
@@ -102,13 +108,16 @@ export default function GameView({ session, onLeave }: Props) {
     // Practice vs AI loops through an in-tab channel (no relay server); real
     // multiplayer uses the WebSocket relay.
     const connect = vsAi ? localRelay : connectRelay;
-    const client = connect(
-      session.gameId,
-      session.role,
-      (msg) => {
+    const onMsg = (msg: any) => {
         if (msg.type === "joined") log(`peer (${msg.role}) joined`);
         else if (msg.type === "left") log(`peer (${msg.role}) left`);
         else if (msg.type === "event") log(`chain event: ${msg.kind}`);
+        // intent/random/move all need the opponent's commitments; until the
+        // chain poll delivers them, queue (the poll replays after setOpponent).
+        else if (!session.opponentInfo && (msg.type === "intent" || msg.type === "random" || msg.type === "move")) {
+          pendingMsgsRef.current.push(msg);
+          log(`${msg.type} queued — waiting for opponent commitments from chain`);
+        }
         else if (msg.type === "intent") {
           const it = decodeIntent(msg.payload);
           const r = session.receiveIntent(it);
@@ -143,14 +152,19 @@ export default function GameView({ session, onLeave }: Props) {
           saveSession(session.serialise());
           force();
         }
-      },
+    };
+    handleMsgRef.current = onMsg;
+    const client = connect(
+      session.gameId,
+      session.role,
+      onMsg,
       (s) => {
         if (lastWsRef.current !== s) { lastWsRef.current = s; log(`relay: ${s}`); }
         setWsStatus(s);
       },
     );
     relayRef.current = client;
-    return () => client.close();
+    return () => { handleMsgRef.current = null; client.close(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.gameId, session.role]);
 
@@ -183,6 +197,12 @@ export default function GameView({ session, onLeave }: Props) {
             });
             log(`opponent commitments fetched from chain (${oppIsX ? "RED" : "BLUE"})`);
             force();
+            // Replay relay messages that raced ahead of the commitments (in
+            // arrival order) — without this the opponent's first roll intent is
+            // dropped and the game hangs on "rolling".
+            const queued = pendingMsgsRef.current.splice(0);
+            if (queued.length) log(`replaying ${queued.length} queued relay message(s)`);
+            for (const m of queued) handleMsgRef.current?.(m);
           }
         }
       } catch (e) {
