@@ -10,4 +10,7 @@ export function logEvent(msg: string): void {
   console.log(`[ttt ${ts()}] ${msg}`);
 }
 
-logEvent("app loaded");
+// Version stamp injected by vite.config.ts `define` (git sha, "-dirty" when the
+// working tree has changes) — proves which code the browser is actually running.
+declare const __APP_VERSION__: string;
+logEvent(`app loaded (${typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : "dev"})`);

@@ -13,6 +13,9 @@ export interface ConnectedAPI {
     networkId: string;
   }>;
   getDustBalance(): Promise<{ cap: bigint; balance: bigint }>;
+  // Shielded balances by raw token type (official dapp-connector-api surface) —
+  // lets us read the win-token count from a connected extension wallet.
+  getShieldedBalances(): Promise<Record<string, bigint>>;
   getDustAddress(): Promise<{ dustAddress: string }>;
   getUnshieldedAddress(): Promise<{ unshieldedAddress: string }>;
   getShieldedAddresses(): Promise<{

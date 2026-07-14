@@ -5,9 +5,10 @@
 // a session wallet, funds it with NIGHT from genesis, registers it for dust, and
 // makes it the gas payer. Injected extension wallets (testnet) can also connect.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { connect, connectSessionWallet, useWallet, isConnected, openWalletModal, closeWalletModal, listWallets, NETWORK_ID, type InitialAPI } from "../wallet/useWallet.ts";
 import { runFaucet, type FaucetResult } from "../wallet/faucet.ts";
+import { readWinBalance } from "../chain/arena.ts";
 
 // Long bech32 addresses → short, readable form: first 10 … last 6.
 const shortAddr = (a: string): string => (a.length <= 18 ? a : `${a.slice(0, 10)}…${a.slice(-6)}`);
@@ -22,6 +23,18 @@ export default function WalletButton() {
   const isLocal = NETWORK_ID === "undeployed";
 
   const connected = isConnected(wallet);
+
+  // Win-token count for the connected wallet — read as soon as it connects,
+  // re-read when the modal opens (e.g. right after a Redeem). Only when
+  // connected: reading with no wallet would spin up the heavy local wallet.
+  const [wins, setWins] = useState<number | null>(null);
+  useEffect(() => {
+    if (!connected) { setWins(null); return; }
+    let live = true;
+    void readWinBalance().then((n) => { if (live) setWins(n); }).catch(() => {});
+    return () => { live = false; };
+  }, [connected, wallet.address, open]);
+
   const label = session
     ? shortAddr(session.address)
     : wallet.address
@@ -57,6 +70,9 @@ export default function WalletButton() {
       >
         <span className={`wallet-dot ${connected ? "wallet" : "off"}`} />
         <span className="wallet-label">{label}</span>
+        {wins !== null && (
+          <span className="wallet-wins" title="Your NixNax wins (shielded win-tokens)">🏆 {wins}</span>
+        )}
       </button>
 
       {open && (
@@ -107,7 +123,10 @@ export default function WalletButton() {
               </div>
             )}
 
-            <p className="wallet-net-note">Network: <strong>{NETWORK_ID}</strong></p>
+            <p className="wallet-net-note">
+              Network: <strong>{NETWORK_ID}</strong>
+              {wins !== null && <> · Wins: <strong>🏆 {wins}</strong></>}
+            </p>
           </div>
         </div>
       )}

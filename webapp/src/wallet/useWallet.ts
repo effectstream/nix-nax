@@ -25,11 +25,18 @@ export interface WalletState {
   modalOpen: boolean; // wallet panel visibility — shared so the lobby can prompt to connect
 }
 
-let state: WalletState = { mode: null, api: null, name: null, address: null, dust: null, connecting: false, modalOpen: false };
-const subs = new Set<() => void>();
-const set = (next: Partial<WalletState>) => { state = { ...state, ...next }; for (const f of subs) f(); };
+// The store lives on globalThis so it survives Vite HMR re-instantiating this
+// module: with a plain module-level variable, an HMR update can leave the UI
+// writing the connection into one module instance while chain code reads a
+// fresh empty one — "connected" in the header, "no wallet" at submit time.
+interface WalletStore { state: WalletState; subs: Set<() => void> }
+const store: WalletStore = ((globalThis as any).__nixnaxWalletStore ??= {
+  state: { mode: null, api: null, name: null, address: null, dust: null, connecting: false, modalOpen: false } as WalletState,
+  subs: new Set<() => void>(),
+});
+const set = (next: Partial<WalletState>) => { store.state = { ...store.state, ...next }; for (const f of store.subs) f(); };
 
-export const walletApi = (): ConnectedAPI | null => state.api;
+export const walletApi = (): ConnectedAPI | null => store.state.api;
 
 // A gas-paying wallet is connected: an injected extension OR the local session wallet.
 export const isConnected = (s: WalletState): boolean => s.mode === "wallet" || s.mode === "local";
@@ -58,6 +65,10 @@ export async function connect(wallet: InitialAPI): Promise<void> {
       api.getDustBalance().catch(() => null),
     ]);
     set({ mode: "wallet", api, name: wallet.name, address: addr?.unshieldedAddress ?? null, dust, connecting: false });
+    // Drop any cached arena handle built for the previous wallet mode so the
+    // next on-chain action attaches via this connection. (Dynamic import:
+    // arena.ts statically imports this module — avoid the cycle.)
+    void import("../chain/arena.ts").then((m) => m.resetArena()).catch(() => {});
     logEvent(`wallet: connected ${wallet.name}${dust ? ` — dust ${dust.balance}/${dust.cap}` : ""}`);
     if (dust && dust.balance === 0n) logEvent("⚠️ wallet has 0 dust — fund it to pay for gas");
   } catch (e) {
@@ -80,8 +91,8 @@ export function disconnect(): void {
 
 export function useWallet(): WalletState {
   return useSyncExternalStore(
-    (cb) => { subs.add(cb); return () => subs.delete(cb); },
-    () => state,
+    (cb) => { store.subs.add(cb); return () => store.subs.delete(cb); },
+    () => store.state,
   );
 }
 

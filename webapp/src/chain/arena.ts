@@ -11,10 +11,11 @@ import { findDeployedContract } from "@midnight-ntwrk/midnight-js-contracts";
 import { encodeCoinPublicKey, rawTokenType } from "@midnight-ntwrk/compact-runtime";
 import { firstValueFrom } from "rxjs";
 import { createNixNaxPrivateState, ledger } from "../../../src/contract/index.ts";
-import { buildBrowserProviders } from "./providers.ts";
+import { buildBrowserProviders, buildConnectorProviders } from "./providers.ts";
 import { ARENA_ADDRESS, IS_UNDEPLOYED, NETWORK_ID } from "./env.ts";
 import { makeCompiled, PRIVATE_STATE_ID } from "./compiled.ts";
 import { getGasWallet } from "../wallet/local-wallet.ts";
+import { walletApi } from "../wallet/useWallet.ts";
 import { logEvent } from "../game/log-store.ts";
 
 // ── Wire types (identical to the old api/http.ts) ───────────────────────────
@@ -121,13 +122,30 @@ function arenaAddress(): Promise<string> {
   return arenaAddrP;
 }
 
+// True when a browser-extension wallet is connected — route through it (it pays
+// its own gas). Otherwise use the local session/genesis wallet (undeployed dev).
+const useConnector = (): boolean => walletApi() !== null;
+
+// Build the provider set for the active wallet mode: a connected extension
+// (Lace) via the DApp-connector adapter, or the local WalletBundle.
+async function providersForMode(opts?: { privateStateStoreName?: string; midnightDbName?: string }): Promise<any> {
+  const wapi = walletApi();
+  if (wapi) return buildConnectorProviders({ api: wapi, ...opts });
+  // On a hosted network the ONLY way to pay gas is a connected extension wallet
+  // — fail with the actual remedy instead of the genesis wallet's error.
+  if (!IS_UNDEPLOYED) {
+    throw new Error(`no browser wallet connected — open Wallet (top-right) and connect one on "${NETWORK_ID}"`);
+  }
+  const wallet = await getGasWallet();
+  return buildBrowserProviders({ wallet, ...opts });
+}
+
 let handleP: Promise<{ found: any; providers: any; addr: string }> | null = null;
 async function attach(): Promise<{ found: any; providers: any; addr: string }> {
   if (handleP) return handleP;
-  handleP = (async () => {
-    const wallet = await getGasWallet();
+  const p = (async () => {
+    const providers = await providersForMode();
     const addr = await arenaAddress();
-    const providers = buildBrowserProviders({ wallet });
     const found = await findDeployedContract(providers as any, {
       contractAddress: addr,
       compiledContract: makeCompiled() as any,
@@ -136,7 +154,13 @@ async function attach(): Promise<{ found: any; providers: any; addr: string }> {
     } as any);
     return { found, providers, addr };
   })();
-  return handleP;
+  // NEVER cache a rejection: Home polls saved sessions at page load, BEFORE a
+  // wallet is connected — on a hosted network that first attach fails, and a
+  // cached rejection would poison every later action (create/join after the
+  // user connects). Retry fresh on the next call instead.
+  p.catch(() => { if (handleP === p) handleP = null; });
+  handleP = p;
+  return p;
 }
 
 // Drop the cached handle so the next action re-attaches — e.g. after the faucet
@@ -148,10 +172,8 @@ export function resetArena(): void {
 // A separate handle with the caller's secret in private state — startTimeout
 // consumes the localSecret witness (mirrors src/sdk/deploy.ts attachWithSecret).
 async function attachWithSecret(secret: Uint8Array): Promise<{ found: any }> {
-  const wallet = await getGasWallet();
   const addr = await arenaAddress();
-  const providers = buildBrowserProviders({
-    wallet,
+  const providers = await providersForMode({
     privateStateStoreName: "nixnax-arena-secret",
     midnightDbName: "nixnax-web-db-secret",
   });
@@ -253,23 +275,25 @@ export async function winTokenRaw(): Promise<string> {
 }
 
 // How many win-tokens the active gas wallet holds (= wins). Reads the live
-// wallet state. Robust to the exact balances-key shape: prefers the precisely
-// derived raw key, else falls back to the sole custom (non-native) shielded
-// balance — the win-token is the only shielded token this dApp ever mints.
+// wallet state and reports EXACTLY the derived win-token key. No sum-the-rest
+// fallback: that heuristic assumed the dev session wallet (win-token is its
+// only shielded token) — against a real connected wallet it happily summed all
+// the player's unrelated shielded tokens into a nonsense "wins" figure.
 export async function readWinBalance(): Promise<number> {
   try {
-    const bundle = await getGasWallet();
-    const st: any = await firstValueFrom((bundle as any).wallet.state());
-    const balances: Record<string, bigint> = st?.shielded?.balances ?? {};
+    let balances: Record<string, bigint>;
+    const wapi = walletApi();
+    if (wapi) {
+      // Connected extension wallet: ask it directly for shielded balances.
+      balances = await wapi.getShieldedBalances();
+    } else {
+      const bundle = await getGasWallet();
+      const st: any = await firstValueFrom((bundle as any).wallet.state());
+      balances = st?.shielded?.balances ?? {};
+    }
     const raw = await winTokenRaw();
     const keys = Object.keys(balances);
-    let n = balances[raw];
-    if (n == null) {
-      // Fallback: sum non-native shielded balances (native shielded tag = 'shielded').
-      let sum = 0n;
-      for (const [k, v] of Object.entries(balances)) if (k !== "shielded") sum += v ?? 0n;
-      n = sum;
-    }
+    const n = balances[raw] ?? 0n;
     logEvent(`wins: ${n} (raw ${raw.slice(0, 16)}…; shielded keys=[${keys.map((k) => k.slice(0, 10)).join(", ")}])`);
     return Number(n ?? 0n);
   } catch (e) {

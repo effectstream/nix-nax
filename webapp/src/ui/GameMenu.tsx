@@ -174,6 +174,7 @@ export default function GameMenu({ open, onClose, session, chain, wsStatus, acti
           </>
         )}
 
+        {a.busy && a.status && <div className="tx-status">⏳ {a.status}</div>}
         {a.error && <div className="error">{a.error}</div>}
 
         <div className="section-title">&nbsp;</div>

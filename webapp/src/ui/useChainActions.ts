@@ -12,8 +12,32 @@ import type { PlayerSession } from "../game/player-session.ts";
 
 const hex = (b: Uint8Array) => Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("");
 
+// Seconds between COMPUTING a window timestamp (untilTime/deadline/respondBy)
+// and the tx actually LANDING on-chain. The contract asserts the window still
+// clears now + minWindowSecs at land time — and in-browser proving of the k=17
+// settle plus a wallet-approval prompt takes minutes, so the old 120s buffer
+// produced "challenge window too short" SegmentFails on a live network. The
+// cost of a bigger buffer is a longer wait before Redeem; the cost of a small
+// one is a burned fee and a failed settle. 600s covers slow proving + a human
+// sitting on the wallet prompt.
+const TX_LANDING_BUFFER_SECS = 600;
+
+// midnight-js throws the raw FinalizedTxData JSON when a landed tx's fallible
+// segment fails on-chain. Translate it for the UI; the raw JSON still goes to
+// the console via logEvent.
+function friendlyTxError(msg: string): string {
+  if (msg.includes("SegmentFail") || msg.includes("FailFallible")) {
+    return "The transaction landed on-chain but a contract check rejected it (segment failed). " +
+      "If this was a settle/timeout, its time window likely went stale while proving — try again.";
+  }
+  return msg;
+}
+
 export interface ChainActions {
   busy: string | null;
+  // What the in-flight action is doing right now ("proving chunk 1/3…") —
+  // ZK proving takes minutes, so the UI must say why it's waiting.
+  status: string | null;
   error: string | null;
   settled: boolean;
   canSettle: boolean;
@@ -46,6 +70,7 @@ export function useChainActions(
   onRefresh: () => void,
 ): ChainActions {
   const [busy, setBusy] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Status enum: 0=halfOpen, 1=inProgress, 2=settled.
@@ -103,15 +128,17 @@ export function useChainActions(
   const wrap = (label: string, fn: () => Promise<unknown>) => () => {
     setError(null);
     setBusy(label);
+    setStatus("Building + proving the transaction — approve in your wallet when prompted…");
     void (async () => {
       try {
         await fn();
       } catch (e) {
         const msg = (e as Error).message;
-        setError(msg);
+        setError(friendlyTxError(msg));
         logEvent(`ERROR ${label}: ${msg}`);
       } finally {
         setBusy(null);
+        setStatus(null);
         onRefresh();
       }
     })();
@@ -120,22 +147,25 @@ export function useChainActions(
   const side = (): "x" | "o" => (session.role === "x" ? "o" : "x"); // fraud is by the opponent
 
   return {
-    busy, error, settled,
+    busy, status, error, settled,
     canSettle, canClaimResult, canStartTimeout, canClaimTimeout,
     canProveT, canProveI, canProveR, canProveP,
     canChallengeRoll, canAnswerRoll, canClaimRoll,
 
     settle: wrap("Submit", async () => {
       const from = chain?.committedTurns ?? 0;
-      // Must exceed the contract's MIN_CHALLENGE_SECS floor; add a buffer for
-      // client-clock vs block-time skew so honest settles aren't rejected.
-      const challengeWindowSec = MIN_CHALLENGE_SECS + 120;
-      const untilTime = Math.floor(Date.now() / 1000) + challengeWindowSec;
-      const chunks = session.settleChunkPayloads(from, untilTime);
+      const chunks = session.settleChunkPayloads(from, 0);
       if (chunks.length === 0) { logEvent("settle: nothing to extend"); return; }
       logEvent(`settle: ${session.committedTurns - from} move(s) in ${chunks.length} chunk(s)…`);
       for (let i = 0; i < chunks.length; i++) {
-        const r = await api.settle({ gameId: session.gameId, secret: hex(session.keys.secret), ...chunks[i] });
+        setStatus(`Proving settle chunk ${i + 1}/${chunks.length} — the settle proof is the big one (a few minutes per chunk). Approve each tx in your wallet…`);
+        // Fresh timestamp PER CHUNK, taken right before proving starts: the
+        // contract checks untilTime > blockTime + minWindowSecs when the tx
+        // LANDS, and each chunk spends minutes in proving + wallet approval. A
+        // single click-time stamp shared by all chunks goes stale (SegmentFail
+        // "challenge window too short").
+        const untilTime = String(Math.floor(Date.now() / 1000) + MIN_CHALLENGE_SECS + TX_LANDING_BUFFER_SECS);
+        const r = await api.settle({ gameId: session.gameId, secret: hex(session.keys.secret), ...chunks[i], untilTime });
         logEvent(`settle chunk ${i + 1}/${chunks.length}: tx ${r.txId}`);
       }
     }),
@@ -146,7 +176,7 @@ export function useChainActions(
     }),
 
     startTimeout: wrap("Start timeout", async () => {
-      const untilTime = String(Math.floor(Date.now() / 1000) + MIN_TIMEOUT_SECS + 120);
+      const untilTime = String(Math.floor(Date.now() / 1000) + MIN_TIMEOUT_SECS + TX_LANDING_BUFFER_SECS);
       const r = await api.startTimeout(session.gameId, hex(session.keys.secret), untilTime);
       logEvent(`start-timeout: tx ${r.txId}`);
     }),
@@ -200,7 +230,7 @@ export function useChainActions(
     // saw the ceremony for (unilateral settle). The mover must answer on-chain
     // before respondBy or forfeit via claimRoll.
     challengeRoll: wrap("Challenge roll", async () => {
-      const respondBy = String(Math.floor(Date.now() / 1000) + MIN_RESPONSE_SECS + 120);
+      const respondBy = String(Math.floor(Date.now() / 1000) + MIN_RESPONSE_SECS + TX_LANDING_BUFFER_SECS);
       const r = await api.challengeRoll(session.gameId, hex(session.keys.secret), unseenTurn!, respondBy);
       logEvent(`challenge-roll: turn ${unseenTurn} — tx ${r.txId}`);
     }),

@@ -26,6 +26,9 @@ import { CONSTANTS } from "../../../src/sdk/env.ts";
 import { NETWORK, STORAGE_PASSWORD, assertNetworkConfigured } from "./env.ts";
 import type { WalletBundle } from "../../../src/sdk/wallet.ts";
 import { ZK_ASSETS_BASE } from "./compiled.ts";
+import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
+import type { ConnectedAPI } from "../wallet/connector.ts";
+import { createConnectorWalletProviders } from "../wallet/connector-adapter.ts";
 
 const ttl = () => new Date(Date.now() + CONSTANTS.TTL_DURATION_MS);
 
@@ -82,5 +85,63 @@ export function buildBrowserProviders(opts: {
     proofProvider: httpClientProofProvider(NETWORK.proofServer, zkConfigProvider as any),
     walletProvider: adapter,
     midnightProvider: adapter,
+  };
+}
+
+// Provider set backed by a connected DApp-connector wallet (e.g. Lace). Mirrors
+// the reference midnight-wallet-dapp buildProvidersFromConnectedAPI: read the
+// wallet's own config (endpoints) + shielded address, wrap it into a
+// wallet/midnight provider, and let the normal `found.callTx.*` flow run — the
+// browser proves, the wallet balances the dust + signs + submits.
+export async function buildConnectorProviders(opts: {
+  api: ConnectedAPI;
+  privateStateStoreName?: string;
+  midnightDbName?: string;
+  initialSecret?: Uint8Array;
+}): Promise<MidnightProviders> {
+  assertNetworkConfigured();
+  const config = await opts.api.getConfiguration();
+  // The local-wallet path sets this inside buildWallet(); the connector path
+  // builds no SDK wallet, so set it here from the wallet's own network before
+  // any contract op (else: "Network ID has not been configured").
+  setNetworkId(config.networkId as any);
+  const sh = await opts.api.getShieldedAddresses();
+  const store = opts.privateStateStoreName ?? "nixnax-arena-connector";
+  const zkConfigProvider = new FetchZkConfigProvider(ZK_BASE, fetch.bind(window));
+  const { walletProvider, midnightProvider } = createConnectorWalletProviders(
+    opts.api,
+    sh.shieldedCoinPublicKey,
+    sh.shieldedEncryptionPublicKey,
+  );
+  // Use the wallet's own endpoints so the dApp and wallet agree on the network;
+  // fall back to our build-time proof server if the wallet doesn't host one.
+  const rawPublicDataProvider = indexerPublicDataProvider(config.indexerUri, config.indexerWsUri);
+  const publicDataProvider = {
+    ...rawPublicDataProvider,
+    async queryZSwapAndContractState(contractAddress: any, queryConfig?: any) {
+      const result = await (rawPublicDataProvider as any).queryZSwapAndContractState(contractAddress, queryConfig);
+      if (!result) return result;
+      const [zswapChainState, contractState, ledgerParameters] = result;
+      return [zswapChainState.postBlockUpdate(new Date()), contractState, ledgerParameters];
+    },
+  };
+  return {
+    privateStateProvider: levelPrivateStateProvider({
+      midnightDbName: opts.midnightDbName ?? "nixnax-web-db-connector",
+      privateStateStoreName: store,
+      signingKeyStoreName: `${store}-signing-keys`,
+      privateStoragePasswordProvider: async () => STORAGE_PASSWORD,
+      accountId: sh.shieldedAddress,
+    } as any),
+    publicDataProvider: publicDataProvider as any,
+    zkConfigProvider: zkConfigProvider as any,
+    // The WALLET's configured proof server is authoritative — the prover sees
+    // private witness data, so a dApp that could steer proving to its own URL
+    // would be an exfiltration vector. Users pick their prover in the wallet
+    // (e.g. Lace settings → localhost:6300 for a self-hosted one). Our VITE_
+    // value is only the fallback for wallets that don't supply one.
+    proofProvider: httpClientProofProvider(config.proverServerUri || NETWORK.proofServer, zkConfigProvider as any),
+    walletProvider,
+    midnightProvider,
   };
 }
