@@ -210,6 +210,7 @@ input[type="text"]::placeholder { color: #5d6b86; }
 .wallet-btn { position: fixed; top: 14px; right: 16px; z-index: 22; display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; font-size: 13px; font-weight: 600; border-radius: 999px; max-width: 244px; }
 .wallet-btn.connected { font-family: ui-monospace, monospace; font-size: 12px; }
 .wallet-btn .wallet-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wallet-btn .wallet-wins { flex-shrink: 0; font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 999px; background: rgba(255, 206, 107, 0.14); border: 1px solid rgba(255, 206, 107, 0.35); }
 .wallet-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: #5d6b86; }
 .wallet-dot.wallet { background: var(--good); box-shadow: 0 0 8px rgba(84, 224, 154, 0.7); }
 .wallet-dot.local { background: var(--warn); box-shadow: 0 0 8px rgba(255, 206, 107, 0.6); }
