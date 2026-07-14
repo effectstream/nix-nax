@@ -84,6 +84,16 @@ export function startAiOpponent(gameId: string): AiHandle {
       persist();
       return;
     }
+    if (ph.phase === "awaitRandom") {
+      // Intent already sent but no reveal — the send may have been lost (the
+      // human's side had no commitments yet, or a reload dropped the in-tab
+      // relay history). myIntent() is idempotent (same stored leaf reveal) and
+      // receiveIntent accepts identical duplicates, so re-send to self-heal.
+      const it = session.myIntent();
+      send("intent", encodeIntent(it));
+      log(`re-sent intent turn=${it.turn} slot=${it.slot} (still waiting for the random reveal)`);
+      return;
+    }
     if (ph.phase !== "act") return;
     const action = chooseAction(session.boardState, session.reserveState, AI_MARK, ph.parity ?? 1);
     if (!action) { log("stalled — no legal placement"); return; }
@@ -170,9 +180,17 @@ export function startAiOpponent(gameId: string): AiHandle {
     }
   })();
 
+  // Self-heal nudge: if we're stuck waiting for the opponent's random reveal,
+  // periodically re-send the intent (idempotent) — covers a reveal lost to the
+  // commitments race or a reload that dropped the in-tab relay history.
+  const nudge = setInterval(() => {
+    if (!stopped && client && session.turnPhase.phase === "awaitRandom") actIfReady();
+  }, 20_000);
+
   return {
     stop() {
       stopped = true;
+      clearInterval(nudge);
       try { client?.close(); } catch { /* noop */ }
     },
   };
