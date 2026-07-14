@@ -120,17 +120,33 @@ export function startAiOpponent(gameId: string): AiHandle {
       if (stopped) return;
       if (st.status === 0) {
         log("joining on-chain…");
-        try {
-          await api.join({
-            gameId,
-            idO: hex(session.keys.id),
-            rootO: "0x" + session.keys.tokenTree.root.field.toString(16),
-            rootIdxO: "0x" + session.keys.indexTree.root.field.toString(16),
-            rootRndO: "0x" + session.keys.randomTree.root.field.toString(16),
-          });
-          log("joined on-chain");
-        } catch (e) {
-          log(`join failed (may already be joined): ${(e as Error).message}`);
+        // Joining right after createGame can be rejected when the wallet
+        // balances against a dust set that hasn't ingested the create tx yet
+        // (same flake the e2e driver retries — DustDoubleSpend class). Retry
+        // with a pause, re-checking the chain between attempts.
+        for (let attempt = 1; attempt <= 4; attempt++) {
+          try {
+            await api.join({
+              gameId,
+              idO: hex(session.keys.id),
+              rootO: "0x" + session.keys.tokenTree.root.field.toString(16),
+              rootIdxO: "0x" + session.keys.indexTree.root.field.toString(16),
+              rootRndO: "0x" + session.keys.randomTree.root.field.toString(16),
+            });
+            log("joined on-chain");
+            break;
+          } catch (e) {
+            if (stopped) return;
+            st = await api.state(gameId);
+            if (st.status !== 0) { log("join landed on-chain after all"); break; }
+            if (attempt === 4) {
+              log(`! join failed after ${attempt} attempts — the game cannot proceed on-chain: ${(e as Error).message}`);
+              return;
+            }
+            log(`join rejected (attempt ${attempt}/4) — retrying in 30s: ${(e as Error).message}`);
+            await new Promise((r) => setTimeout(r, 30_000));
+            if (stopped) return;
+          }
         }
         if (stopped) return;
         st = await api.state(gameId);
