@@ -131,6 +131,11 @@ const useConnector = (): boolean => walletApi() !== null;
 async function providersForMode(opts?: { privateStateStoreName?: string; midnightDbName?: string }): Promise<any> {
   const wapi = walletApi();
   if (wapi) return buildConnectorProviders({ api: wapi, ...opts });
+  // On a hosted network the ONLY way to pay gas is a connected extension wallet
+  // — fail with the actual remedy instead of the genesis wallet's error.
+  if (!IS_UNDEPLOYED) {
+    throw new Error(`no browser wallet connected — open Wallet (top-right) and connect one on "${NETWORK_ID}"`);
+  }
   const wallet = await getGasWallet();
   return buildBrowserProviders({ wallet, ...opts });
 }
