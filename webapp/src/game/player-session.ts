@@ -45,7 +45,7 @@ import {
 } from "../../../src/sdk/crypto/signed-move.ts";
 import {
   MAX_TURNS,
-  SETTLE_CHUNK,
+  SETTLE_VARIANTS,
   KIND_PLACE,
   applyAction,
   anyLegalPlace,
@@ -467,8 +467,12 @@ export class PlayerSession {
   // ── Settlement payloads ──────────────────────────────────────────────────
 
   // Chunked settle payloads covering local turns [fromTurn, committedTurns).
-  // POST each in order; every chunk strictly extends the chain.
+  // POST each in order; every chunk strictly extends the chain. Each chunk is
+  // sized to one of the contract's settle variants (SETTLE_VARIANTS): the
+  // largest while more moves remain, then the smallest variant that fits the
+  // tail — fewer txs for long histories, a smaller/faster circuit for tails.
   settleChunkPayloads(fromTurn: number, untilTimeSec: number): Array<{
+    variant: number;
     nMoves: number;
     parities: number[];
     kinds: number[];
@@ -483,14 +487,22 @@ export class PlayerSession {
       leaf: toHex(new Uint8Array(32)),
       path: Array.from({ length: 14 }, () => ({ sibling: "0x0", goes_left: false })),
     };
-    for (let base = fromTurn; base < this.movesLog.length; base += SETTLE_CHUNK) {
-      const moves = this.movesLog.slice(base, base + SETTLE_CHUNK);
-      const parities = new Array<number>(SETTLE_CHUNK).fill(0);
-      const kinds = new Array<number>(SETTLE_CHUNK).fill(0);
-      const cells = new Array<number>(SETTLE_CHUNK).fill(0);
-      const sizes = new Array<number>(SETTLE_CHUNK).fill(0);
-      const secrets = new Array<string>(SETTLE_CHUNK).fill(toHex(new Uint8Array(32)));
-      const paths = new Array<WirePath>(SETTLE_CHUNK).fill(zeroPath);
+    const largest = SETTLE_VARIANTS[0];
+    for (let base = fromTurn; base < this.movesLog.length; ) {
+      const remaining = this.movesLog.length - base;
+      // Largest variant while it fills completely; else the smallest that
+      // covers the whole tail in one tx (unused slots are zero-padded).
+      const variant = remaining >= largest
+        ? largest
+        : [...SETTLE_VARIANTS].reverse().find((v) => v >= remaining) ?? largest;
+      const take = Math.min(variant, remaining);
+      const moves = this.movesLog.slice(base, base + take);
+      const parities = new Array<number>(variant).fill(0);
+      const kinds = new Array<number>(variant).fill(0);
+      const cells = new Array<number>(variant).fill(0);
+      const sizes = new Array<number>(variant).fill(0);
+      const secrets = new Array<string>(variant).fill(toHex(new Uint8Array(32)));
+      const paths = new Array<WirePath>(variant).fill(zeroPath);
       moves.forEach((m, i) => {
         parities[i] = m.turn === 0 ? 1 : this.parityForTurn(m.turn) ?? 0;
         kinds[i] = m.kind;
@@ -500,10 +512,12 @@ export class PlayerSession {
         paths[i] = encodePath(m.token.path);
       });
       out.push({
+        variant,
         nMoves: moves.length,
         parities, kinds, cells, sizes, secrets, paths,
         untilTime: String(untilTimeSec),
       });
+      base += take;
     }
     return out;
   }

@@ -444,16 +444,35 @@ circuit dynDecided(d: GameDyn, w: Winner): GameDyn {
 // ---------------------------------------------------------------------------
 // Chunked settle
 // ---------------------------------------------------------------------------
+// One GENERIC implementation sized by #N (moves per chunk), exported as
+// monomorphic variants (generic circuits cannot be entry points). All settle
+// asserts live here ONCE, so every variant is identical by construction. The
+// caller picks the best fit: settle2 for short tails (much smaller circuit →
+// much faster proof), settle11 to cut the tx count of long histories.
+// 11 is the LARGEST size the node accepts: the circuit must stay k=17 —
+// settle12 crosses into k=18 and the node rejects the call at dispatch
+// (1010 Custom(168): verification weight over the per-tx budget; a 16-slot
+// settle was measured failing the same way on node 1.0.0).
 
-export circuit settle(
+// Even test for the compile-time-unrolled loop index (i is a literal after
+// monomorphization, so this folds to a constant — no circuit cost). Covers
+// every variant size up to 32.
+circuit chunkIdxIsEven(i: Uint<8>): Boolean {
+  return (i == 0) || (i == 2) || (i == 4) || (i == 6) ||
+         (i == 8) || (i == 10) || (i == 12) || (i == 14) ||
+         (i == 16) || (i == 18) || (i == 20) || (i == 22) ||
+         (i == 24) || (i == 26) || (i == 28) || (i == 30);
+}
+
+circuit settleImpl<#N>(
   gameId: Bytes<32>,
   nMoves: Uint<8>,
-  parities: Vector<8, Uint<8>>,   // claimed CLASS per move: 1=place, 0=remove/pass
-  kinds: Vector<8, Uint<8>>,
-  cells: Vector<8, Uint<8>>,
-  sizes: Vector<8, Uint<8>>,
-  secrets: Vector<8, Bytes<32>>,
-  paths: Vector<8, MerkleTreePath<14, Bytes<32>>>,
+  parities: Vector<N, Uint<8>>,   // claimed CLASS per move: 1=place, 0=remove/pass
+  kinds: Vector<N, Uint<8>>,
+  cells: Vector<N, Uint<8>>,
+  sizes: Vector<N, Uint<8>>,
+  secrets: Vector<N, Bytes<32>>,
+  paths: Vector<N, MerkleTreePath<14, Bytes<32>>>,
   untilTime: Uint<64>
 ): [] {
   const gid = disclose(gameId);
@@ -465,7 +484,7 @@ export circuit settle(
 
   const n = disclose(nMoves);
   assert(n > 0, "empty chunk");
-  assert(n <= 8, "chunk too large");
+  assert(n <= N, "chunk too large");
   const base = d0.committedTurns;
   assert(base + n <= 128, "exceeds max turns");
   // C1: the challenge window must be at least MIN_CHALLENGE_SECS in the future.
@@ -479,14 +498,14 @@ export circuit settle(
   assert(blockTimeLt((challengeEnd - minWin) as Uint<64>), "challenge window too short");
   const baseIsEven = isEvenTurn(base as Uint<16>);
 
-  for (const i of 0..8) {
+  for (const i of 0..N) {
     if (i < n) {
       // A win inside this chunk must be the FINAL move of the history.
       const dCur = gameState.lookup(gid);
       assert(dCur.winner == Winner.none, "moves after game end");
 
       const tAbs = (base + i) as Uint<16>;
-      const iIsEven = (i == 0) || (i == 2) || (i == 4) || (i == 6);
+      const iIsEven = chunkIdxIsEven(i as Uint<8>);
       const isXTurn = iIsEven ? baseIsEven : !baseIsEven;
       const mark = isXTurn ? 1 as Uint<8> : 2 as Uint<8>;
       const oppMark = isXTurn ? 2 as Uint<8> : 1 as Uint<8>;
@@ -599,6 +618,50 @@ export circuit settle(
     hasRollChallenge: dEnd.hasRollChallenge,
     respondBy: dEnd.respondBy
   });
+}
+
+// Monomorphic entry points over settleImpl. `settle` keeps its original name
+// (and 8-move size) so existing callers are unchanged.
+export circuit settle2(
+  gameId: Bytes<32>,
+  nMoves: Uint<8>,
+  parities: Vector<2, Uint<8>>,
+  kinds: Vector<2, Uint<8>>,
+  cells: Vector<2, Uint<8>>,
+  sizes: Vector<2, Uint<8>>,
+  secrets: Vector<2, Bytes<32>>,
+  paths: Vector<2, MerkleTreePath<14, Bytes<32>>>,
+  untilTime: Uint<64>
+): [] {
+  return settleImpl<2>(gameId, nMoves, parities, kinds, cells, sizes, secrets, paths, untilTime);
+}
+
+export circuit settle(
+  gameId: Bytes<32>,
+  nMoves: Uint<8>,
+  parities: Vector<8, Uint<8>>,
+  kinds: Vector<8, Uint<8>>,
+  cells: Vector<8, Uint<8>>,
+  sizes: Vector<8, Uint<8>>,
+  secrets: Vector<8, Bytes<32>>,
+  paths: Vector<8, MerkleTreePath<14, Bytes<32>>>,
+  untilTime: Uint<64>
+): [] {
+  return settleImpl<8>(gameId, nMoves, parities, kinds, cells, sizes, secrets, paths, untilTime);
+}
+
+export circuit settle11(
+  gameId: Bytes<32>,
+  nMoves: Uint<8>,
+  parities: Vector<11, Uint<8>>,
+  kinds: Vector<11, Uint<8>>,
+  cells: Vector<11, Uint<8>>,
+  sizes: Vector<11, Uint<8>>,
+  secrets: Vector<11, Bytes<32>>,
+  paths: Vector<11, MerkleTreePath<14, Bytes<32>>>,
+  untilTime: Uint<64>
+): [] {
+  return settleImpl<11>(gameId, nMoves, parities, kinds, cells, sizes, secrets, paths, untilTime);
 }
 
 // Finalise after the challenge window expires. The WINNER (proving knowledge of

@@ -215,14 +215,16 @@ export interface SettleChunk {
   paths: MerklePath[];
 }
 
-export function packChunk(pair: TestPair, baseTurn: number, moves: ScriptMove[]): SettleChunk {
-  if (moves.length > CHUNK) throw new Error("chunk too large");
-  const parities: bigint[] = new Array(CHUNK).fill(0n);
-  const kinds: bigint[] = new Array(CHUNK).fill(0n);
-  const cells: bigint[] = new Array(CHUNK).fill(0n);
-  const sizes: bigint[] = new Array(CHUNK).fill(0n);
-  const secrets: Uint8Array[] = new Array(CHUNK).fill(ZERO_BYTES32);
-  const paths: MerklePath[] = new Array(CHUNK).fill(ZERO_PATH_14);
+// chunkSize picks the settle variant the chunk targets (2 → settle2, 8 →
+// settle, 16 → settle16); array lengths must match the entry point's vectors.
+export function packChunk(pair: TestPair, baseTurn: number, moves: ScriptMove[], chunkSize: number = CHUNK): SettleChunk {
+  if (moves.length > chunkSize) throw new Error("chunk too large");
+  const parities: bigint[] = new Array(chunkSize).fill(0n);
+  const kinds: bigint[] = new Array(chunkSize).fill(0n);
+  const cells: bigint[] = new Array(chunkSize).fill(0n);
+  const sizes: bigint[] = new Array(chunkSize).fill(0n);
+  const secrets: Uint8Array[] = new Array(chunkSize).fill(ZERO_BYTES32);
+  const paths: MerklePath[] = new Array(chunkSize).fill(ZERO_PATH_14);
 
   for (let i = 0; i < moves.length; i++) {
     const m = moves[i];
@@ -239,6 +241,21 @@ export function packChunk(pair: TestPair, baseTurn: number, moves: ScriptMove[])
   }
   return { nMoves: BigInt(moves.length), parities, kinds, cells, sizes, secrets, paths };
 }
+
+// All-place 16-move script for a SCHEDULE_C pair (X even turns / O odd): X
+// fills 0,1,2,4,5,6,8,9 (never 4 in a line); O fills 3,7,11,12,13,14,10,15 —
+// the FINAL move (turn 15, cell 15) completes row3 {12,13,14,15} and col3
+// {3,7,11,15}, so O wins exactly on the last move. Sized for one settle16.
+export const SIXTEEN_C: ScriptMove[] = [
+  { kind: 1, cell: 0, size: 0 }, { kind: 1, cell: 3, size: 0 },
+  { kind: 1, cell: 1, size: 0 }, { kind: 1, cell: 7, size: 0 },
+  { kind: 1, cell: 2, size: 0 }, { kind: 1, cell: 11, size: 0 },
+  { kind: 1, cell: 4, size: 1 }, { kind: 1, cell: 12, size: 1 },
+  { kind: 1, cell: 5, size: 1 }, { kind: 1, cell: 13, size: 1 },
+  { kind: 1, cell: 6, size: 1 }, { kind: 1, cell: 14, size: 1 },
+  { kind: 1, cell: 8, size: 2 }, { kind: 1, cell: 10, size: 2 },
+  { kind: 1, cell: 9, size: 2 }, { kind: 1, cell: 15, size: 2 },
+];
 
 // ── Adversarial index tree (equivocation composition test) ──────────────────
 // A malicious player builds an I-tree that commits a SECOND, different leaf for

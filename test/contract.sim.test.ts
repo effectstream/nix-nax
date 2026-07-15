@@ -25,6 +25,7 @@ import {
   revealFor,
   buildMaliciousIndexTree,
   buildMaliciousTokenTree,
+  SIXTEEN_C,
   ZERO_PATH_7,
   ZERO_PATH_11,
   ZERO_BYTES32,
@@ -1610,5 +1611,135 @@ describe("malformed inputs: forged leaves & stale status", () => {
       1n, 4n, 0n, pair.x.token.secrets[t][4], pair.x.token.pathFor(t, KIND_PLACE, 4, 0),
       1n, 5n, 0n, pair.x.token.secrets[t][5], pair.x.token.pathFor(t, KIND_PLACE, 5, 0),
     )).toThrow(/already settled/);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Settle variants: settle2 / settle11 (one generic settleImpl<#N>, monomorphic
+// entry points; 11 is the largest chunk that stays k=17 — the node rejects
+// k=18 calls). Every rule assert lives in the shared generic body, so each
+// variant must behave exactly like `settle` — these tests pin that down, plus
+// the per-variant nMoves bound.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// All-place 16-move script for playersC (X even turns / O odd): X fills
+// 0,1,2,4,5,6,8,9 (never 4 in a line); O fills 3,7,11,12,13,14,10,15 — the
+// FINAL move (turn 15, cell 15) completes row3 {12,13,14,15} AND col3
+// {3,7,11,15}, so O wins exactly on the chunk's last move.
+const SIXTEEN: ScriptMove[] = SIXTEEN_C;
+
+function settleVariant(
+  contract: any,
+  state: any,
+  privateState: any,
+  pair: TestPair,
+  baseTurn: number,
+  moves: ScriptMove[],
+  variant: 2 | 8 | 11,
+  opts: { time?: number; until?: bigint; nMovesOverride?: bigint } = {},
+) {
+  const c = packChunk(pair, baseTurn, moves, variant);
+  if (opts.nMovesOverride !== undefined) c.nMoves = opts.nMovesOverride;
+  const name = variant === 8 ? "settle" : `settle${variant}`;
+  const ctx = newCircuitCtx(state, privateState, opts.time ?? 1000);
+  const res = call(contract, name, ctx, pair.gameId, c.nMoves, c.parities, c.kinds, c.cells, c.sizes, c.secrets, c.paths, opts.until ?? 5000n);
+  return res.context.currentQueryContext.state;
+}
+
+describe("settle variants: settle2 / settle11", () => {
+  test("settle2 commits a 2-move chunk", () => {
+    const pair = playersC();
+    const { contract, privateState, state } = setup(pair);
+    const s1 = settleVariant(contract, state, privateState, pair, 0, SIXTEEN.slice(0, 2), 2);
+    const l = led(s1);
+    expect(Number(dynOf(l, pair).committedTurns)).toBe(2);
+    expect(topAt(l, pair, 0)).toBe(1); // X on cell 0
+    expect(topAt(l, pair, 3)).toBe(2); // O on cell 3
+  });
+
+  test("settle2 commits a padded 1-move tail after a full settle(8)", () => {
+    const pair = playersC();
+    const { contract, privateState, state } = setup(pair);
+    const s1 = settleChunk(contract, state, privateState, pair, 0, SIXTEEN.slice(0, 8), { time: 1000 });
+    const s2 = settleVariant(contract, s1, privateState, pair, 8, SIXTEEN.slice(8, 9), 2, { time: 1100 });
+    const l = led(s2);
+    expect(Number(dynOf(l, pair).committedTurns)).toBe(9);
+    expect(topAt(l, pair, 5)).toBe(1); // turn 8: X on cell 5
+  });
+
+  test("settle11 commits 11 moves in ONE call", () => {
+    const pair = playersC();
+    const { contract, privateState, state } = setup(pair);
+    const s1 = settleVariant(contract, state, privateState, pair, 0, SIXTEEN.slice(0, 11), 11);
+    const d = dynOf(led(s1), pair);
+    expect(Number(d.committedTurns)).toBe(11);
+    expect(d.winner).toBe(Winner.none); // SIXTEEN only wins on its 16th move
+  });
+
+  test("mixed variants (settle11 + settle) equal two settle(8) calls, win included", () => {
+    const pair = playersC();
+    const a = setup(pair);
+    const b = setup(pair);
+    // Path A: 16 moves as settle11 + settle(8, padded 5-move tail).
+    let viaMixed = settleVariant(a.contract, a.state, a.privateState, pair, 0, SIXTEEN.slice(0, 11), 11, { time: 1000 });
+    viaMixed = settleVariant(a.contract, viaMixed, a.privateState, pair, 11, SIXTEEN.slice(11), 8, { time: 1100 });
+    // Path B: the same 16 moves as two settle(8) chunks.
+    const via8 = settleChunk(b.contract, b.state, b.privateState, pair, 0, SIXTEEN, { time: 1000 });
+    const lM = led(viaMixed);
+    const l8 = led(via8);
+    expect(Number(dynOf(lM, pair).committedTurns)).toBe(Number(dynOf(l8, pair).committedTurns));
+    expect(dynOf(lM, pair).winner).toBe(dynOf(l8, pair).winner);
+    expect(dynOf(lM, pair).winner).toBe(Winner.o); // win on the final move survives the mix
+    for (let c = 0; c < 16; c++) expect(topAt(lM, pair, c)).toBe(topAt(l8, pair, c));
+    // Same packed action log entry per turn.
+    for (let t = 0; t < 16; t++) {
+      expect(Number(lM.actionLogs.lookup(pair.gameId).lookup(BigInt(t))))
+        .toBe(Number(l8.actionLogs.lookup(pair.gameId).lookup(BigInt(t))));
+    }
+  });
+
+  test("settle2 rejects nMoves above its size (chunk too large)", () => {
+    const pair = playersC();
+    const { contract, privateState, state } = setup(pair);
+    expect(() =>
+      settleVariant(contract, state, privateState, pair, 0, SIXTEEN.slice(0, 2), 2, { nMovesOverride: 3n }),
+    ).toThrow(/chunk too large/);
+  });
+
+  test("settle11 rejects an empty chunk", () => {
+    const pair = playersC();
+    const { contract, privateState, state } = setup(pair);
+    expect(() =>
+      settleVariant(contract, state, privateState, pair, 0, [], 11, { nMovesOverride: 0n }),
+    ).toThrow(/empty chunk/);
+  });
+
+  test("rule asserts live in every variant: bad token path rejected by settle11", () => {
+    const pair = playersC();
+    const { contract, privateState, state } = setup(pair);
+    const c = packChunk(pair, 0, SIXTEEN.slice(0, 2), 11);
+    c.paths[0] = pair.x.token.pathFor(0, KIND_PLACE, 1, 0); // path for a DIFFERENT action
+    const ctx = newCircuitCtx(state, privateState, 1000);
+    expect(() =>
+      call(contract, "settle11", ctx, pair.gameId, c.nMoves, c.parities, c.kinds, c.cells, c.sizes, c.secrets, c.paths, 5000n),
+    ).toThrow(/invalid one-time token/);
+  });
+
+  test("rule asserts live in every variant: class lie rejected by settle2", () => {
+    const pair = playersC();
+    const { contract, privateState, state } = setup(pair);
+    const lied: ScriptMove[] = [{ kind: KIND_PLACE, cell: 0, size: 0, lieParity: 0 }];
+    expect(() =>
+      settleVariant(contract, state, privateState, pair, 0, lied, 2),
+    ).toThrow(/action kind inconsistent/);
+  });
+
+  test("challenge-window floor applies to settle2", () => {
+    const pair = playersC();
+    const { contract, privateState, state } = setup(pair);
+    // blockTime 1000, until 1500: 1500 - 600 = 900 < 1000 → too short.
+    expect(() =>
+      settleVariant(contract, state, privateState, pair, 0, SIXTEEN.slice(0, 2), 2, { time: 1000, until: 1500n }),
+    ).toThrow(/challenge window too short/);
   });
 });

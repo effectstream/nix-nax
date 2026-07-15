@@ -163,6 +163,53 @@ export async function ensureArenaDeployed(opts: {
   return { contractAddress, wallet: opts.wallet, providers, found, reused };
 }
 
+// Upgrade an EXISTING arena in place: install verifier keys for circuits the
+// deployment doesn't have yet (e.g. new settle variants added after deploy).
+// Maintenance txs must be signed with the contract's maintenance key, which
+// lives in the ORIGINAL deployer's signing-key store — run this with the same
+// store/db names (and on the same machine) as the deploy that created the
+// arena. No proof server needed: VK inserts are signed maintenance txs.
+export async function insertMissingVerifierKeys(opts: {
+  wallet: WalletBundle;
+  contractAddress: string;
+  privateStateStoreName?: string;
+  midnightDbName?: string;
+}): Promise<{ inserted: string[]; present: string[] }> {
+  setNetworkId(NETWORK.networkId);
+  const providers = buildProviders({
+    wallet: opts.wallet,
+    zkConfigPath: ARTIFACTS_DIR,
+    privateStateStoreName: opts.privateStateStoreName ?? "nixnax-arena",
+    networkUrls: NETWORK,
+    midnightDbName: opts.midnightDbName ?? "nixnax-level-db-arena",
+  });
+  const st = await (providers.publicDataProvider as any).queryContractState(opts.contractAddress);
+  if (!st) throw new Error(`no contract on-chain at ${opts.contractAddress}`);
+  const circuitIds = Object.keys(new (Contract as any)(createWitnesses()).impureCircuits ?? {});
+  const missing = circuitIds.filter((id) => st.operation(id) === undefined);
+  const present = circuitIds.filter((id) => st.operation(id) !== undefined);
+  if (missing.length === 0) {
+    log.info(`All ${circuitIds.length} circuits already installed — nothing to do.`);
+    return { inserted: [], present };
+  }
+  log.info(`Missing on-chain: ${missing.join(", ")} (${present.length} present)`);
+  const fullCompiled = makeCompiled();
+  for (const circuitId of missing) {
+    const vk = await (providers as any).zkConfigProvider.getVerifierKey(circuitId);
+    log.info(`Inserting verifier key for '${circuitId}'…`);
+    await submitInsertVerifierKeyTx(
+      providers as any,
+      fullCompiled as any,
+      opts.contractAddress,
+      circuitId as never,
+      vk,
+    );
+    await waitForOperation(providers, opts.contractAddress, circuitId);
+  }
+  log.info(`Upgrade complete: ${missing.length} verifier key(s) installed at ${opts.contractAddress}`);
+  return { inserted: missing, present };
+}
+
 // Build a PROVEN but UNBOUND, dust-less call tx (no fees, NOT submitted) and
 // return it hex-serialized. A connected browser wallet then balances the dust
 // + submits it — so the PLAYER pays their own gas. Relay-pays actions keep
