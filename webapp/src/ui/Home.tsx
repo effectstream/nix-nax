@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, type ContractState } from "../chain/arena.ts";
 import { generatePlayerKeys, PlayerSession } from "../game/player-session.ts";
 import { dropSession, listSessions, loadSession, saveSession, markVsAi, clearVsAi, type IndexEntry } from "../game/storage.ts";
+import { listPendingRedeems, removePendingRedeem, redeemCountdown, type PendingRedeem } from "../game/pending-redeems.ts";
 import { logEvent } from "../game/log-store.ts";
 import { colorOfRole } from "../game/labels.ts";
 import { submitCreateGame, submitJoin } from "../wallet/submit.ts";
@@ -53,6 +54,13 @@ export default function Home({ onOpen }: HomeProps) {
   const [reconRole, setReconRole] = useState<Role>("o");
   const [saved, setSaved] = useState<IndexEntry[]>([]);
   const [states, setStates] = useState<Record<string, string>>({});
+  // Won-but-unredeemed games (localStorage, written by GameView). Re-read on a
+  // 1s tick while any countdown is running so "ready in mm:ss" stays live.
+  const [pending, setPending] = useState<PendingRedeem[]>(() => listPendingRedeems());
+  useEffect(() => {
+    const id = setInterval(() => setPending(listPendingRedeems()), 1000);
+    return () => clearInterval(id);
+  }, []);
   const wallet = useWallet();
   const connected = isConnected(wallet);
   const [relayUp, setRelayUp] = useState<boolean | null>(null); // null = still checking
@@ -88,6 +96,18 @@ export default function Home({ onOpen }: HomeProps) {
       api.state(e.addr)
         .then((s) => setStates((m) => ({ ...m, [e.addr]: stateSummary(s) })))
         .catch(() => setStates((m) => ({ ...m, [e.addr]: "unknown (relay/chain)" })));
+    }
+    // Sweep stale pending redeems: already finalized (redeemed from another
+    // browser) or gone from the chain (local chain wiped).
+    for (const p of listPendingRedeems()) {
+      api.state(p.gameId)
+        .then((s) => { if (s.status === 2) { removePendingRedeem(p.gameId); setPending(listPendingRedeems()); } })
+        .catch((e) => {
+          if (/no such game/i.test((e as Error).message)) {
+            removePendingRedeem(p.gameId);
+            setPending(listPendingRedeems());
+          }
+        });
     }
   }, []);
 
@@ -213,6 +233,24 @@ export default function Home({ onOpen }: HomeProps) {
 
           {view === "menu" && (
             <>
+              {pending.length > 0 && (
+                <div className="col" style={{ margin: "0 0 12px" }}>
+                  {pending.map((p) => {
+                    const left = redeemCountdown(p.redeemableAt);
+                    return (
+                      <div key={p.gameId} className="pending-redeem">
+                        <span>
+                          🏆 <strong>Win to redeem</strong> — game {p.gameId.slice(0, 10)}…{" "}
+                          {left ? <>ready in <strong className="mono">{left}</strong></> : <strong>ready now</strong>}
+                        </span>
+                        <button className="btn-o btn-sm" onClick={() => reconnect(p.gameId, p.role)}>
+                          {left ? "Open" : "Redeem"}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
               {!connected && (
                 <p className="muted" style={{ margin: "0 0 10px", fontSize: 13 }}>
                   🔑 Connect a wallet to play — use the <strong>Wallet</strong> button (top-right).

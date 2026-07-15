@@ -307,3 +307,7 @@ input[type="text"]::placeholder { color: #5d6b86; }
 .ledger { max-height: 200px; overflow-y: auto; display: grid; grid-template-columns: auto 1fr auto; gap: 4px 10px; font-size: 12px; }
 .ledger .lk { color: var(--fg-1); }
 .ledger .lv { font-family: ui-monospace, monospace; }
+
+/* Lobby reminder: a won game whose win-token is waiting on the challenge window */
+.pending-redeem { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; padding: 9px 12px; border-radius: 12px; background: rgba(255, 206, 107, 0.1); border: 1px solid rgba(255, 206, 107, 0.35); text-align: left; }
+.pending-redeem .mono { font-family: ui-monospace, monospace; }

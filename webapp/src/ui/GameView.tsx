@@ -15,6 +15,7 @@ import {
   encodeMove,
 } from "../game/player-session.ts";
 import { saveSession, isVsAi } from "../game/storage.ts";
+import { upsertPendingRedeem, removePendingRedeem, redeemCountdown } from "../game/pending-redeems.ts";
 import { startAiOpponent } from "../game/ai-opponent.ts";
 import { nextAiThought } from "../game/ai-flavor.ts";
 import { logEvent } from "../game/log-store.ts";
@@ -342,6 +343,37 @@ export default function GameView({ session, onLeave }: Props) {
   const headline = winner === "draw" ? "Draw" : iWon ? "You win!" : "You lose";
   const recorded = chain?.status === 2;
 
+  // ── Pending-redeem tracking + live countdown ───────────────────────────────
+  // Record a won-but-unredeemed game in localStorage (the lobby reminds you
+  // after a reload); clear it once finalized. The challenge window is many
+  // minutes — the tab rarely survives it.
+  const chainWonByMe = (chain?.winner === 1 && session.role === "x") || (chain?.winner === 2 && session.role === "o");
+  useEffect(() => {
+    if (!chain) return;
+    if (chain.status === 2) { removePendingRedeem(session.gameId); return; }
+    if (chainWonByMe) {
+      upsertPendingRedeem({
+        gameId: session.gameId,
+        role: session.role,
+        redeemableAt: chain.hasChallenge ? Number(chain.challengeUntil) : 0,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chain?.status, chain?.winner, chain?.challengeUntil, chain?.hasChallenge]);
+
+  // 1s tick while a challenge window is open so the countdown runs and the
+  // Redeem button enables itself the moment the window closes (the chain poll
+  // alone only re-renders every 3s and canClaimResult compares wall-clock).
+  const windowOpen = !!chain && chain.status !== 2 && chain.hasChallenge &&
+    Number(chain.challengeUntil) > Math.floor(Date.now() / 1000);
+  useEffect(() => {
+    if (!windowOpen) return;
+    const id = setInterval(force, 1000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [windowOpen]);
+  const redeemIn = chain?.hasChallenge ? redeemCountdown(Number(chain.challengeUntil)) : null;
+
   return (
     <div className="stage-root">
       <div className={`board-stage ${acting ? "" : "inactive3d"}`}>
@@ -440,11 +472,21 @@ export default function GameView({ session, onLeave }: Props) {
                   {iWon && <> Winning mints you a 🏆 <strong>win-token</strong>.</>}
                 </p>
                 <button className="btn-o btn-block" disabled={!actions.canSettle || actions.busy !== null} onClick={actions.settle}>
-                  {actions.busy === "Submit" ? "Submitting…" : actions.canSettle ? "Submit result" : "Submitted — wait for window"}
+                  {actions.busy === "Submit" ? "Submitting…" : actions.canSettle ? "Submit result" : "Submitted ✓"}
                 </button>
                 <button className="btn-o btn-block" disabled={!actions.canClaimResult || actions.busy !== null} onClick={actions.claimResult}>
-                  {actions.busy === "Redeem" ? "Redeeming…" : iWon ? "Redeem — mint win token 🏆" : "Redeem"}
+                  {actions.busy === "Redeem"
+                    ? "Redeeming…"
+                    : !actions.canClaimResult && redeemIn
+                      ? `Redeem in ${redeemIn} — challenge window ⏳`
+                      : iWon ? "Redeem — mint win token 🏆" : "Redeem"}
                 </button>
+                {!actions.busy && redeemIn && (
+                  <p className="muted" style={{ margin: 0 }}>
+                    The challenge window protects your opponent's right to dispute. You can close
+                    this tab — the lobby remembers your pending redeem.
+                  </p>
+                )}
                 {actions.busy && actions.status && <div className="tx-status">⏳ {actions.status}</div>}
                 {actions.error && <div className="error">{actions.error}</div>}
                 <button className="back-link" onClick={() => setWinDismissed(true)}>Hide — view the board</button>
