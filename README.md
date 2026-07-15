@@ -30,6 +30,14 @@ Neither player controls the roll — it is the XOR of secret bits both sides com
 
 ### Run it locally
 
+> **Check your `.env` first.** The webapp targets whatever network the repo-root
+> `.env` selects — and copying `.env.example` sets `VITE_NETWORK_ID=preview`
+> (the live preview deployment). For the LOCAL stack below, set
+> `VITE_NETWORK_ID=undeployed` in `.env` (or have no `.env` at all — everything
+> defaults to the local stack). The browser console's first line,
+> `app loaded (<version>)`, plus the wallet modal's `Network:` row tell you
+> which network a running build is on.
+
 ```bash
 # 1. Install root dependencies
 bun install
