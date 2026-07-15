@@ -7,7 +7,7 @@
 
 import { useEffect, useState } from "react";
 import { connect, connectSessionWallet, useWallet, isConnected, openWalletModal, closeWalletModal, listWallets, NETWORK_ID, type InitialAPI } from "../wallet/useWallet.ts";
-import { runFaucet, type FaucetResult } from "../wallet/faucet.ts";
+import { runFaucet, fundConnectedWallet, type FaucetResult } from "../wallet/faucet.ts";
 import { readWinBalance } from "../chain/arena.ts";
 
 // Long bech32 addresses → short, readable form: first 10 … last 6.
@@ -61,6 +61,25 @@ export default function WalletButton() {
     })();
   };
 
+  // Dev-chain faucet for a CONNECTED extension wallet (e.g. Lace on
+  // undeployed): sends NIGHT from genesis to its address. First run brings up
+  // the genesis wallet (~30s sync).
+  const [extFunding, setExtFunding] = useState(false);
+  const doFundConnected = () => {
+    if (!wallet.address) return;
+    setExtFunding(true);
+    setFaucetLog([]);
+    void (async () => {
+      try {
+        await fundConnectedWallet(wallet.address!, (s) => setFaucetLog((l) => [...l.slice(-7), s]));
+      } catch (e) {
+        setFaucetLog((l) => [...l, "❌ " + (e as Error).message]);
+      } finally {
+        setExtFunding(false);
+      }
+    })();
+  };
+
   return (
     <>
       <button
@@ -83,6 +102,19 @@ export default function WalletButton() {
               Transactions are built, proven, and submitted in your browser — no server. Gas is
               paid by an in-browser wallet.
             </p>
+
+            {isLocal && wallet.mode === "wallet" && wallet.address && (
+              <div className="col" style={{ marginTop: 4 }}>
+                <button className="btn-glass btn-block" onClick={doFundConnected} disabled={extFunding}>
+                  {extFunding ? "Funding…" : `🚰 Faucet — fund ${shortAddr(wallet.address)} with NIGHT`}
+                </button>
+                <p className="muted" style={{ margin: "2px 2px 0" }}>
+                  Dev-chain faucet: sends NIGHT from the genesis wallet to your connected wallet.
+                  Your wallet then registers it for dust (gas). CLI alternative:{" "}
+                  <span className="mono">bun run faucet -- &lt;your-address&gt;</span>
+                </p>
+              </div>
+            )}
 
             {isLocal && (
               <div className="col" style={{ marginTop: 4 }}>
@@ -116,8 +148,8 @@ export default function WalletButton() {
                 ))}
                 {isLocal && (
                   <p className="muted" style={{ margin: "6px 2px 0" }}>
-                    External wallets must be set to <strong>{NETWORK_ID}</strong> and self-funded —
-                    there's no faucet for them here. On the local dev chain, use the Session Wallet above.
+                    External wallets must be set to <strong>{NETWORK_ID}</strong>. After connecting,
+                    a <strong>Faucet</strong> button appears above to fund them with dev-chain NIGHT.
                   </p>
                 )}
               </div>

@@ -6,6 +6,7 @@
 
 import { firstValueFrom } from "rxjs";
 import { unshieldedToken } from "@midnight-ntwrk/ledger-v8";
+import { MidnightBech32m, UnshieldedAddress } from "@midnight-ntwrk/wallet-sdk-address-format";
 import { NETWORK, NETWORK_ID, IS_UNDEPLOYED } from "../chain/env.ts";
 import { buildWallet, waitForFunds, registerNightForDust, type WalletBundle } from "../../../src/sdk/wallet.ts";
 import { getGenesisWallet, setGasWallet } from "./local-wallet.ts";
@@ -42,6 +43,40 @@ export interface FaucetResult {
   unshielded: bigint;
   dust: bigint;
   alreadyFunded: boolean;
+}
+
+// Fund a CONNECTED EXTERNAL wallet (e.g. Lace) on the local dev chain: decode
+// its bech32 unshielded address and transfer NIGHT from the genesis wallet.
+// Undeployed-only — genesis holds no funds on real networks. Dust generation
+// happens wallet-side: the extension registers its own NIGHT UTXOs (we can't —
+// registration must be signed by the receiving wallet's keys).
+export async function fundConnectedWallet(
+  bech32Address: string,
+  log: (s: string) => void = logEvent,
+): Promise<{ txHash: string; amount: bigint }> {
+  if (!IS_UNDEPLOYED) {
+    throw new Error(`the dev faucet is undeployed-only (network is "${NETWORK_ID}") — use the ${NETWORK_ID} network faucet to fund your wallet`);
+  }
+  const receiverAddress = MidnightBech32m.parse(bech32Address).decode(
+    UnshieldedAddress as any,
+    NETWORK.networkId as any,
+  );
+  const main = await getGenesisWallet();
+  log(`faucet: transferring ${FUND_AMOUNT} NIGHT from genesis → ${bech32Address.slice(0, 20)}…`);
+  const transfer = [{
+    type: "unshielded",
+    outputs: [{ amount: FUND_AMOUNT, receiverAddress, type: unshieldedToken().raw }],
+  }];
+  const recipe = await (main.wallet as any).transferTransaction(
+    transfer,
+    { shieldedSecretKeys: main.zswapSecretKeys, dustSecretKey: main.dustSecretKey },
+    { ttl: ttl() },
+  );
+  const signed = await main.wallet.signRecipe(recipe, (p) => main.unshieldedKeystore.signData(p));
+  const finalized = await main.wallet.finalizeRecipe(signed);
+  const txHash = String(await main.wallet.submitTransaction(finalized));
+  log(`faucet: ✅ transfer tx ${txHash.slice(0, 16)}… — NIGHT will appear in your wallet shortly; it should then register it for dust (gas) generation`);
+  return { txHash, amount: FUND_AMOUNT };
 }
 
 // Fund the session wallet (if needed), register it for dust, and activate it as
