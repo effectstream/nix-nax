@@ -42,5 +42,5 @@ const signed = await main.wallet.signRecipe(recipe, (p) => main.unshieldedKeysto
 const finalized = await main.wallet.finalizeRecipe(signed);
 const txHash = await main.wallet.submitTransaction(finalized);
 console.log(`✅ faucet tx ${txHash}`);
-console.log(`   NIGHT will appear in the wallet shortly; it registers dust (gas) itself.`);
+console.log(`   NIGHT will appear in the wallet shortly. Register it for dust (gas) from the wallet's own UI.`);
 process.exit(0);

@@ -75,7 +75,7 @@ export async function fundConnectedWallet(
   const signed = await main.wallet.signRecipe(recipe, (p) => main.unshieldedKeystore.signData(p));
   const finalized = await main.wallet.finalizeRecipe(signed);
   const txHash = String(await main.wallet.submitTransaction(finalized));
-  log(`faucet: ✅ transfer tx ${txHash.slice(0, 16)}… — NIGHT will appear in your wallet shortly; it should then register it for dust (gas) generation`);
+  log(`faucet: ✅ transfer tx ${txHash.slice(0, 16)}… — NIGHT will appear in your wallet shortly. Register it for dust (gas) from your wallet's own UI.`);
   return { txHash, amount: FUND_AMOUNT };
 }
 

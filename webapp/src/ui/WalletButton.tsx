@@ -6,7 +6,7 @@
 // makes it the gas payer. Injected extension wallets (testnet) can also connect.
 
 import { useEffect, useState } from "react";
-import { connect, connectSessionWallet, useWallet, isConnected, openWalletModal, closeWalletModal, listWallets, NETWORK_ID, type InitialAPI } from "../wallet/useWallet.ts";
+import { connect, connectSessionWallet, disconnect, useWallet, isConnected, openWalletModal, closeWalletModal, listWallets, NETWORK_ID, type InitialAPI } from "../wallet/useWallet.ts";
 import { runFaucet, fundConnectedWallet, type FaucetResult } from "../wallet/faucet.ts";
 import { readWinBalance } from "../chain/arena.ts";
 
@@ -103,56 +103,75 @@ export default function WalletButton() {
               paid by an in-browser wallet.
             </p>
 
-            {isLocal && wallet.mode === "wallet" && wallet.address && (
+            {connected ? (
+              /* ── Connected: show THE connection, not more connect options ── */
               <div className="col" style={{ marginTop: 4 }}>
-                <button className="btn-glass btn-block" onClick={doFundConnected} disabled={extFunding}>
-                  {extFunding ? "Funding…" : `🚰 Faucet — fund ${shortAddr(wallet.address)} with NIGHT`}
-                </button>
-                <p className="muted" style={{ margin: "2px 2px 0" }}>
-                  Dev-chain faucet: sends NIGHT from the genesis wallet to your connected wallet.
-                  Your wallet then registers it for dust (gas). CLI alternative:{" "}
-                  <span className="mono">bun run faucet -- &lt;your-address&gt;</span>
-                </p>
-              </div>
-            )}
+                <div className="wallet-row static">
+                  <span className="wallet-dot wallet" />
+                  <span className="name">
+                    {wallet.mode === "local" ? "Session Wallet + Auto Faucet" : (wallet.name ?? "Connected wallet")}
+                  </span>
+                  <span className="pay">pays gas</span>
+                </div>
+                {(wallet.address ?? session?.address) && (
+                  <p className="wallet-addr-full mono">{wallet.address ?? session?.address}</p>
+                )}
+                {wallet.mode === "local" && session && (
+                  <p className="muted" style={{ margin: 0 }}>dust {String(session.dust)}</p>
+                )}
+                {wallet.mode === "wallet" && wallet.dust && (
+                  <p className="muted" style={{ margin: 0 }}>dust {String(wallet.dust.balance)}</p>
+                )}
 
-            {isLocal && (
-              <div className="col" style={{ marginTop: 4 }}>
-                {session ? (
+                {isLocal && wallet.mode === "wallet" && wallet.address && (
                   <>
-                    <div className="wallet-row static">
-                      <span className="wallet-dot wallet" />
-                      <span className="name">Session Wallet + Auto Faucet</span>
-                      <span className="pay">pays gas</span>
-                    </div>
-                    <p className="wallet-addr-full mono">{session.address}</p>
-                    <p className="muted" style={{ margin: 0 }}>dust {String(session.dust)}</p>
+                    <button className="btn-glass btn-block" onClick={doFundConnected} disabled={extFunding}>
+                      {extFunding ? "Funding…" : `🚰 Faucet — fund ${shortAddr(wallet.address)} with NIGHT`}
+                    </button>
+                    <p className="muted" style={{ margin: "2px 2px 0" }}>
+                      Dev-chain faucet: sends NIGHT from the genesis wallet. Register it for dust
+                      (gas) from your wallet's own UI — dust delegation stays under the wallet's
+                      control. CLI: <span className="mono">bun run faucet -- &lt;your-address&gt;</span>
+                    </p>
                   </>
-                ) : (
-                  <button className="btn-glass btn-block" onClick={doFaucet} disabled={faucetRunning}>
-                    {faucetRunning ? "Connecting…" : "🚰 Session Wallet + Auto Faucet"}
-                  </button>
                 )}
-                {faucetLog.length > 0 && <pre className="faucet-log">{faucetLog.join("\n")}</pre>}
-              </div>
-            )}
 
-            {wallets.length > 0 && (
-              <div className="wallet-list" style={{ marginTop: 12 }}>
-                {wallets.map((w) => (
-                  <button key={w.rdns} className="wallet-row" onClick={() => pickWallet(w)}>
-                    {w.icon ? <img src={w.icon} alt="" className="wallet-icon" /> : <span className="wallet-icon ph" />}
-                    <span className="name">{w.name}</span>
-                    <span className="pay">you pay gas</span>
-                  </button>
-                ))}
-                {isLocal && (
-                  <p className="muted" style={{ margin: "6px 2px 0" }}>
-                    External wallets must be set to <strong>{NETWORK_ID}</strong>. After connecting,
-                    a <strong>Faucet</strong> button appears above to fund them with dev-chain NIGHT.
-                  </p>
-                )}
+                {faucetLog.length > 0 && <pre className="faucet-log">{faucetLog.join("\n")}</pre>}
+
+                <button className="btn-glass btn-block" onClick={() => { setSession(null); disconnect(); }}>
+                  Disconnect
+                </button>
               </div>
+            ) : (
+              /* ── Not connected: the connect options ── */
+              <>
+                {isLocal && (
+                  <div className="col" style={{ marginTop: 4 }}>
+                    <button className="btn-glass btn-block" onClick={doFaucet} disabled={faucetRunning}>
+                      {faucetRunning ? "Connecting…" : "🚰 Session Wallet + Auto Faucet"}
+                    </button>
+                    {faucetLog.length > 0 && <pre className="faucet-log">{faucetLog.join("\n")}</pre>}
+                  </div>
+                )}
+
+                {wallets.length > 0 && (
+                  <div className="wallet-list" style={{ marginTop: 12 }}>
+                    {wallets.map((w) => (
+                      <button key={w.rdns} className="wallet-row" onClick={() => pickWallet(w)}>
+                        {w.icon ? <img src={w.icon} alt="" className="wallet-icon" /> : <span className="wallet-icon ph" />}
+                        <span className="name">{w.name}</span>
+                        <span className="pay">you pay gas</span>
+                      </button>
+                    ))}
+                    {isLocal && (
+                      <p className="muted" style={{ margin: "6px 2px 0" }}>
+                        External wallets must be set to <strong>{NETWORK_ID}</strong>. After connecting,
+                        a <strong>Faucet</strong> button appears to fund them with dev-chain NIGHT.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </>
             )}
 
             <p className="wallet-net-note">
