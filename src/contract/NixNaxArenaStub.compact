@@ -19,10 +19,6 @@ struct GameKeys {
   idO: Bytes<32>,
   rootX: MerkleTreeDigest,
   rootO: MerkleTreeDigest,
-  rootIdxX: MerkleTreeDigest,
-  rootIdxO: MerkleTreeDigest,
-  rootRndX: MerkleTreeDigest,
-  rootRndO: MerkleTreeDigest,
 }
 
 struct GameDyn {
@@ -30,13 +26,6 @@ struct GameDyn {
   committedTurns: Uint<8>,
   status: Status,
   winner: Winner,
-  deadline: Uint<64>,
-  hasDeadline: Boolean,
-  challengeUntil: Uint<64>,
-  hasChallenge: Boolean,
-  challengeTurn: Uint<16>,
-  hasRollChallenge: Boolean,
-  respondBy: Uint<64>,
 }
 
 export ledger gameKeys: Map<Bytes<32>, GameKeys>;
@@ -45,12 +34,5 @@ export ledger boards: Map<Bytes<32>, Map<Uint<16>, Uint<8>>>;
 export ledger tops: Map<Bytes<32>, Map<Uint<16>, Uint<8>>>;
 export ledger reserves: Map<Bytes<32>, Map<Uint<16>, Uint<8>>>;
 export ledger actionLogs: Map<Bytes<32>, Map<Uint<16>, Uint<16>>>;
-export ledger rollAnswered: Map<Bytes<32>, Map<Uint<16>, Boolean>>;
-export sealed ledger minWindowSecs: Uint<64>;
 
-// The stub is what is actually deployed (then circuits are attached), so its
-// constructor sets the shared config the real circuits read. MUST match
-// NixNaxArena.compact's constructor.
-constructor(minWindow: Uint<64>) {
-  minWindowSecs = disclose(minWindow);
-}
+constructor() {}

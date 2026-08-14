@@ -31,21 +31,13 @@ import {
   verifyIntent,
   verifyRandomReveal,
   verifySignedMove,
-  buildEquivocationProof,
-  buildIndexEquivocationProof,
-  buildRandomEquivocationProof,
-  buildWrongParityProof,
   type Intent,
   type RandomReveal,
   type SignedMove,
-  type EquivocationProof,
-  type IndexEquivocationProof,
-  type RandomEquivocationProof,
-  type WrongParityProof,
 } from "../../../src/sdk/crypto/signed-move.ts";
 import {
   MAX_TURNS,
-  SETTLE_VARIANTS,
+  SETTLE_CHUNK,
   KIND_PLACE,
   applyAction,
   anyLegalPlace,
@@ -56,7 +48,6 @@ import {
   jointRollValue,
   moverForTurn,
   topsView,
-  unpackLogEntry,
   winnerAfterMove,
   type Action,
   type Kind,
@@ -95,11 +86,13 @@ export interface PlayerKeys {
   randomTree: RandomTree;
 }
 
+// SIMPLIFIED (teaching) version: only the TOKEN root is committed on-chain, so
+// moves are verified under the opponent's root but the roll-ceremony reveals
+// (I/R trees) are integrity-checked without root membership — this version
+// trusts the players on the dice.
 export interface OpponentInfo {
   id: Uint8Array;
   rootToken: bigint;
-  rootIdx: bigint;
-  rootRnd: bigint;
 }
 
 export type TurnPhase =
@@ -177,7 +170,7 @@ export interface SerializedSession {
   indexBits: number[];
   randomValues: string;       // hex blob
   randomBits: number[];
-  opponent: { id: string; rootToken: string; rootIdx: string; rootRnd: string } | null;
+  opponent: { id: string; rootToken: string } | null;
   moves: WireSignedMove[];
   intents: (WireIntent | null)[];        // by turn
   reveals: (WireRandomReveal | null)[];  // by turn
@@ -327,7 +320,7 @@ export class PlayerSession {
     }
     const it = this.intents[t];
     if (!it) return { ok: false, reason: "no intent sent for this turn yet" };
-    const v = verifyRandomReveal(r, this.gameId, t, it.slot, this.opponent.rootRnd);
+    const v = verifyRandomReveal(r, this.gameId, t, it.slot, null);
     if (!v.ok) return v;
     const prior = this.reveals[t];
     if (prior) {
@@ -377,7 +370,7 @@ export class PlayerSession {
     const v = verifySignedMove(move, this.movesLog[this.movesLog.length - 1] ?? null, {
       moverRootToken: this.keys.tokenTree.root.field,
       moverRootIdx: this.keys.indexTree.root.field,
-      responderRootRnd: this.opponent?.rootRnd ?? 0n,
+      responderRootRnd: null, // opponent's root is not known in the trusting version
     });
     if (!v.ok) throw new Error(v.reason);
 
@@ -396,7 +389,7 @@ export class PlayerSession {
     if (t !== this.currentTurn || this.nextTurnRole === this.role) {
       return { ok: false, reason: `unexpected intent for turn ${t}` };
     }
-    const v = verifyIntent(it, this.gameId, t, this.opponent.rootIdx);
+    const v = verifyIntent(it, this.gameId, t, null);
     if (!v.ok) return v;
     const prior = this.intents[t];
     if (prior) {
@@ -441,7 +434,7 @@ export class PlayerSession {
     const prev = this.movesLog.length ? this.movesLog[this.movesLog.length - 1] : null;
     const v = verifySignedMove(m, prev, {
       moverRootToken: this.opponent.rootToken,
-      moverRootIdx: this.opponent.rootIdx,
+      moverRootIdx: null,     // I/R roots are not on-chain in the trusting version
       responderRootRnd: this.keys.randomTree.root.field, // I am the responder
     });
     if (!v.ok) return v;
@@ -467,156 +460,56 @@ export class PlayerSession {
   // ── Settlement payloads ──────────────────────────────────────────────────
 
   // Chunked settle payloads covering local turns [fromTurn, committedTurns).
-  // POST each in order; every chunk strictly extends the chain. Each chunk is
-  // sized to one of the contract's settle variants (SETTLE_VARIANTS): the
-  // largest while more moves remain, then the smallest variant that fits the
-  // tail — fewer txs for long histories, a smaller/faster circuit for tails.
-  settleChunkPayloads(fromTurn: number, untilTimeSec: number): Array<{
-    variant: number;
+  // POST each in order; every chunk strictly extends the chain. Each chunk
+  // carries up to SETTLE_CHUNK moves (unused slots zero-padded), each with its
+  // one-time token reveal (secret + Merkle path) — the contract verifies them
+  // under the mover's committed root.
+  //
+  // NO 1-MOVE CHUNKS: the node's fee layer rejects a settle tx whose state
+  // transcript is minimal (Malformed(FeeCalculation) — see README "Known
+  // issues"). When the tail would be 1 move, rebalance the last two chunks
+  // (…7+2 instead of 8+1). A totally-single-move settle (only 1 new move
+  // exists) cannot be avoided client-side.
+  settleChunkPayloads(fromTurn: number): Array<{
     nMoves: number;
-    parities: number[];
     kinds: number[];
     cells: number[];
     sizes: number[];
     secrets: string[];
     paths: WirePath[];
-    untilTime: string;
   }> {
-    const out = [] as ReturnType<PlayerSession["settleChunkPayloads"]>;
     const zeroPath: WirePath = {
       leaf: toHex(new Uint8Array(32)),
       path: Array.from({ length: 14 }, () => ({ sibling: "0x0", goes_left: false })),
     };
-    const largest = SETTLE_VARIANTS[0];
-    for (let base = fromTurn; base < this.movesLog.length; ) {
-      const remaining = this.movesLog.length - base;
-      // Largest variant while it fills completely; else the smallest that
-      // covers the whole tail in one tx (unused slots are zero-padded).
-      const variant = remaining >= largest
-        ? largest
-        : [...SETTLE_VARIANTS].reverse().find((v) => v >= remaining) ?? largest;
-      const take = Math.min(variant, remaining);
+    const total = this.movesLog.length - fromTurn;
+    const takes: number[] = [];
+    for (let remaining = total; remaining > 0; ) {
+      let take = Math.min(SETTLE_CHUNK, remaining);
+      if (remaining - take === 1) take -= 1; // leave a 2-move tail, never 1
+      takes.push(take);
+      remaining -= take;
+    }
+    const out = [] as ReturnType<PlayerSession["settleChunkPayloads"]>;
+    let base = fromTurn;
+    for (const take of takes) {
       const moves = this.movesLog.slice(base, base + take);
-      const parities = new Array<number>(variant).fill(0);
-      const kinds = new Array<number>(variant).fill(0);
-      const cells = new Array<number>(variant).fill(0);
-      const sizes = new Array<number>(variant).fill(0);
-      const secrets = new Array<string>(variant).fill(toHex(new Uint8Array(32)));
-      const paths = new Array<WirePath>(variant).fill(zeroPath);
+      const kinds = new Array<number>(SETTLE_CHUNK).fill(0);
+      const cells = new Array<number>(SETTLE_CHUNK).fill(0);
+      const sizes = new Array<number>(SETTLE_CHUNK).fill(0);
+      const secrets = new Array<string>(SETTLE_CHUNK).fill(toHex(new Uint8Array(32)));
+      const paths = new Array<WirePath>(SETTLE_CHUNK).fill(zeroPath);
       moves.forEach((m, i) => {
-        parities[i] = m.turn === 0 ? 1 : this.parityForTurn(m.turn) ?? 0;
         kinds[i] = m.kind;
         cells[i] = m.cell;
         sizes[i] = m.size;
         secrets[i] = toHex(m.token.secret);
         paths[i] = encodePath(m.token.path);
       });
-      out.push({
-        variant,
-        nMoves: moves.length,
-        parities, kinds, cells, sizes, secrets, paths,
-        untilTime: String(untilTimeSec),
-      });
+      out.push({ nMoves: moves.length, kinds, cells, sizes, secrets, paths });
       base += take;
     }
     return out;
-  }
-
-  // ── Fraud detectors ──────────────────────────────────────────────────────
-
-  // T-tree: opponent committed two actions for one turn.
-  detectEquivocation(extraMoves: SignedMove[] = []): EquivocationProof | null {
-    const oppTurn = (t: number) => (this.role === "x" ? t % 2 === 1 : t % 2 === 0);
-    const cands = [...this.movesLog, ...extraMoves].filter((m) => oppTurn(m.turn));
-    for (let i = 0; i < cands.length; i++) {
-      for (let j = i + 1; j < cands.length; j++) {
-        const a = cands[i], b = cands[j];
-        if (a.turn === b.turn && (a.kind !== b.kind || a.cell !== b.cell || a.size !== b.size)) {
-          return buildEquivocationProof(a, b);
-        }
-      }
-    }
-    return null;
-  }
-
-  // I-tree: opponent committed two (slot, bit) for one turn.
-  detectIndexEquivocation(): IndexEquivocationProof | null {
-    const oppTurn = (t: number) => (this.role === "x" ? t % 2 === 1 : t % 2 === 0);
-    const all: Intent[] = [
-      ...this.intents.filter((x): x is Intent => !!x && oppTurn(x.turn)),
-      ...this.extraIntents,
-    ];
-    for (let i = 0; i < all.length; i++) {
-      for (let j = i + 1; j < all.length; j++) {
-        const a = all[i], b = all[j];
-        if (a.turn === b.turn && (a.slot !== b.slot || a.bits.join("") !== b.bits.join(""))) {
-          return buildIndexEquivocationProof(a, b);
-        }
-      }
-    }
-    return null;
-  }
-
-  // R-tree: opponent committed two (bit, random) for one (turn, slot).
-  detectRandomEquivocation(): RandomEquivocationProof | null {
-    const oppRevealed = (t: number) => (this.role === "x" ? t % 2 === 0 : t % 2 === 1); // responder = non-mover
-    const all: RandomReveal[] = [
-      ...this.reveals.filter((x): x is RandomReveal => !!x && oppRevealed(x.turn)),
-      ...this.extraReveals,
-    ];
-    for (let i = 0; i < all.length; i++) {
-      for (let j = i + 1; j < all.length; j++) {
-        const a = all[i], b = all[j];
-        if (a.turn === b.turn && a.slot === b.slot && (a.bits.join("") !== b.bits.join("") || !bytesEq(a.random, b.random))) {
-          return buildRandomEquivocationProof(a, b);
-        }
-      }
-    }
-    return null;
-  }
-
-  // A committed OPPONENT turn whose ceremony this session never saw — the
-  // unilateral-settle case the roll-class dispute (challengeRoll) exists for.
-  // detectWrongParity can't act there (no local evidence to judge with); this
-  // returns the first such turn so the UI can demand the evidence on-chain.
-  detectUnseenRoll(chainActionLog: { turn: number; packed: number }[]): number | null {
-    for (const entry of chainActionLog) {
-      const t = entry.turn;
-      if (t === 0) continue;
-      const moverMark = t % 2 === 0 ? 1 : 2;
-      if (moverMark === this.myMark) continue; // only the responder may challenge
-      if (this.parityForTurn(t) === null) return t;
-    }
-    return null;
-  }
-
-  // Evidence for answering a roll-class challenge on MY turn t: my I-reveal +
-  // the opponent's R-reveal (same payload shape as a wrong-parity proof).
-  // Null if this session never completed the ceremony for t — in which case
-  // the challenge is unanswerable by construction.
-  rollAnswerFor(t: number): WrongParityProof | null {
-    const it = this.intents[t];
-    const rv = this.reveals[t];
-    if (!it || !rv) return null;
-    return buildWrongParityProof(it, rv);
-  }
-
-  // Wrong parity: compare the on-chain actionLog's claimed parities against
-  // the locally known committed bits. Returns the first provable lie.
-  detectWrongParity(chainActionLog: { turn: number; packed: number }[]): WrongParityProof | null {
-    for (const entry of chainActionLog) {
-      const t = entry.turn;
-      if (t === 0) continue;
-      const real = this.parityForTurn(t);
-      if (real === null) continue; // ceremony unknown locally — cannot judge
-      const { claimedParity } = unpackLogEntry(entry.packed);
-      if (claimedParity === real) continue;
-      const it = this.intents[t];
-      const rv = this.reveals[t];
-      if (!it || !rv) continue;
-      return buildWrongParityProof(it, rv);
-    }
-    return null;
   }
 
   // ── Convenience for the UI ───────────────────────────────────────────────
@@ -665,12 +558,7 @@ export class PlayerSession {
       randomValues: toHex(flatRandoms),
       randomBits,
       opponent: this.opponent
-        ? {
-            id: toHex(this.opponent.id),
-            rootToken: "0x" + this.opponent.rootToken.toString(16),
-            rootIdx: "0x" + this.opponent.rootIdx.toString(16),
-            rootRnd: "0x" + this.opponent.rootRnd.toString(16),
-          }
+        ? { id: toHex(this.opponent.id), rootToken: "0x" + this.opponent.rootToken.toString(16) }
         : null,
       moves: this.movesLog.map(encodeMove),
       intents: this.intents.map((x) => (x ? encodeIntent(x) : null)),
@@ -698,12 +586,7 @@ export class PlayerSession {
       s.gameId,
       keys,
       s.opponent
-        ? {
-            id: fromHex(s.opponent.id),
-            rootToken: BigInt(s.opponent.rootToken),
-            rootIdx: BigInt(s.opponent.rootIdx),
-            rootRnd: BigInt(s.opponent.rootRnd),
-          }
+        ? { id: fromHex(s.opponent.id), rootToken: BigInt(s.opponent.rootToken) }
         : null,
     );
     for (const m of s.moves) session.movesLog.push(decodeMove(m));

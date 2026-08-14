@@ -20,14 +20,41 @@ export const sessionWalletAvailable = IS_UNDEPLOYED;
 const FUND_AMOUNT = 50_000_000_000_000n; // NIGHT moved genesis → session
 const ttl = () => new Date(Date.now() + 30 * 60 * 1000);
 
+const SEED_RE = /^[0-9a-f]{64}$/;
+
+// The persisted seed, or null when this browser has never made a session wallet.
+// Anything that isn't a 32-byte hex seed is treated as absent: a truncated or
+// hand-edited value would build a DIFFERENT wallet than the funded one, and
+// silently losing the funds is worse than minting a fresh seed. localStorage
+// itself can throw (private mode, storage disabled) — degrade, don't crash.
+function readStoredSeed(): string | null {
+  try {
+    const s = localStorage.getItem(SESSION_SEED_KEY);
+    return s && SEED_RE.test(s) ? s : null;
+  } catch {
+    return null;
+  }
+}
+
+// True when a previous visit left a session wallet behind. Cheap — no wallet is
+// built, so the caller can decide whether to pay for a restore.
+export function hasStoredSessionWallet(): boolean {
+  return readStoredSeed() !== null;
+}
+
 // A stable per-browser session seed so the session wallet (and its on-chain
-// NIGHT/dust) survives reloads.
+// NIGHT/dust) survives reloads. Created once, then reused forever.
 function sessionSeed(): string {
-  let s = localStorage.getItem(SESSION_SEED_KEY);
-  if (!s) {
-    const b = crypto.getRandomValues(new Uint8Array(32));
-    s = Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("");
+  const stored = readStoredSeed();
+  if (stored) return stored;
+  const b = crypto.getRandomValues(new Uint8Array(32));
+  const s = Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("");
+  try {
     localStorage.setItem(SESSION_SEED_KEY, s);
+  } catch {
+    // Unpersistable (private mode): the wallet still works for this page view,
+    // it just won't survive a reload — and its NIGHT is stranded, so say so.
+    logEvent("⚠️ wallet: browser storage unavailable — this session wallet will be lost on reload");
   }
   return s;
 }
@@ -77,6 +104,32 @@ export async function fundConnectedWallet(
   const txHash = String(await main.wallet.submitTransaction(finalized));
   log(`faucet: ✅ transfer tx ${txHash.slice(0, 16)}… — NIGHT will appear in your wallet shortly. Register it for dust (gas) from your wallet's own UI.`);
   return { txHash, amount: FUND_AMOUNT };
+}
+
+// Bring back the session wallet this browser already owns, and only fund it if
+// it actually needs funding. Returns null when there is nothing to recover (no
+// stored seed, or not the dev network) so the caller can leave the UI alone.
+//
+// The funding decision is made from CHAIN state, not from a local "I funded
+// this once" flag: the dev chain is routinely wiped and redeployed underneath a
+// browser that still holds the seed, and in that case the recovered wallet is
+// real but broke, and must be re-funded.
+export async function restoreSessionWallet(log: (s: string) => void = logEvent): Promise<FaucetResult | null> {
+  if (!sessionWalletAvailable || !hasStoredSessionWallet()) return null;
+
+  const session = await getSessionWallet();
+  log(`wallet: recovered session wallet ${session.unshieldedAddress.slice(0, 24)}… from this browser`);
+  const funds = await waitForFunds(session, { requireShielded: false });
+
+  if (funds.dust > 0n) {
+    setGasWallet(session);
+    resetArena();
+    log(`wallet: already funded (dust ${funds.dust}) — skipping the faucet`);
+    return { address: session.unshieldedAddress, unshielded: funds.unshielded, dust: funds.dust, alreadyFunded: true };
+  }
+
+  log(`wallet: recovered wallet has no dust (unshielded=${funds.unshielded}) — running the faucet`);
+  return runFaucet(log);
 }
 
 // Fund the session wallet (if needed), register it for dust, and activate it as

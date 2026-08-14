@@ -1,13 +1,13 @@
 // Permanent top-right wallet control (rendered at the App level, so it's on the
-// lobby and in-game alike). Post-serverless: every tx is built + submitted in the
-// browser, and gas is paid by an in-browser wallet (the genesis wallet by
+// lobby and in-game alike). No game backend: every tx is built + submitted in the
+// browser (proofs come from a proof server), and gas is paid by an in-browser wallet (the genesis wallet by
 // default). On the `undeployed` dev network, the modal offers a FAUCET that mints
 // a session wallet, funds it with NIGHT from genesis, registers it for dust, and
 // makes it the gas payer. Injected extension wallets (testnet) can also connect.
 
-import { useEffect, useState } from "react";
-import { connect, connectSessionWallet, disconnect, useWallet, isConnected, openWalletModal, closeWalletModal, listWallets, NETWORK_ID, type InitialAPI } from "../wallet/useWallet.ts";
-import { runFaucet, fundConnectedWallet, type FaucetResult } from "../wallet/faucet.ts";
+import { useEffect, useRef, useState } from "react";
+import { connect, connectSessionWallet, disconnect, useWallet, isConnected, openWalletModal, closeWalletModal, listWallets, readWalletPreference, walletApi, NETWORK_ID, type InitialAPI } from "../wallet/useWallet.ts";
+import { runFaucet, restoreSessionWallet, hasStoredSessionWallet, fundConnectedWallet, type FaucetResult } from "../wallet/faucet.ts";
 import { readWinBalance } from "../chain/arena.ts";
 
 // Long bech32 addresses → short, readable form: first 10 … last 6.
@@ -43,7 +43,57 @@ export default function WalletButton() {
         ? (wallet.name ?? "Connected")
         : "Wallet";
 
-  const pickWallet = async (w: InitialAPI) => { closeWalletModal(); await connect(w); };
+  // The player picked an extension — abandon any session-wallet restore still
+  // in flight so its late result can't seize the connection back.
+  const supersededRef = useRef(false);
+  const pickWallet = async (w: InitialAPI) => {
+    supersededRef.current = true;
+    closeWalletModal();
+    await connect(w);
+  };
+
+  // Put back the wallet the player chose LAST TIME — and only that one. With no
+  // remembered choice (first visit, or after Disconnect) nothing is connected
+  // or built: a stored seed alone is not consent, and silently spinning up the
+  // session wallet would both waste ~30s and decide for someone who came here
+  // to use their extension. An extension choice is never auto-reconnected
+  // either, since that can pop the wallet's approval prompt unbidden; the
+  // player clicks it, which is one click and no surprises.
+  const [restoring, setRestoring] = useState(false);
+  useEffect(() => {
+    if (!isLocal || connected) return;
+    if (readWalletPreference() !== "local" || !hasStoredSessionWallet()) return;
+    let live = true;
+    setRestoring(true);
+    void restoreSessionWallet((s) => { if (live) setFaucetLog((l) => [...l.slice(-7), s]); })
+      .then((r) => {
+        if (!live || !r) return;
+        // The restore takes ~30s; the player may have connected an extension
+        // in the meantime. Theirs wins — just leave the funded session wallet
+        // sitting there for next time.
+        if (supersededRef.current || walletApi() !== null) {
+          setFaucetLog((l) => [...l, "wallet: kept your connected wallet — the session wallet stays available"]);
+          return;
+        }
+        setSession(r);
+        connectSessionWallet(r.address);
+      })
+      .catch((e) => { if (live) setFaucetLog((l) => [...l, "❌ " + (e as Error).message]); })
+      .finally(() => { if (live) setRestoring(false); });
+    return () => { live = false; };
+    // Mount-only: the guards above decide whether it runs at all.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Step away from the active wallet and forget the remembered choice, so the
+  // next load connects nothing. The session wallet's seed (and its NIGHT) stays
+  // in localStorage — this is "stop using it", not "throw it away".
+  const doDisconnect = () => {
+    supersededRef.current = true;
+    setSession(null);
+    setFaucetLog([]);
+    disconnect();
+  };
 
   const doFaucet = () => {
     setFaucetRunning(true);
@@ -99,8 +149,10 @@ export default function WalletButton() {
           <div className="modal-card glass wallet-modal" onClick={(e) => e.stopPropagation()}>
             <h2 className="modal-title">Wallet</h2>
             <p className="muted" style={{ marginTop: 0 }}>
-              Transactions are built, proven, and submitted in your browser — no server. Gas is
-              paid by an in-browser wallet.
+              Transactions are built and submitted by your browser, and gas is paid by an
+              in-browser wallet — there is no game backend. Zero-knowledge proofs are generated
+              by a <strong>proof server</strong> (your wallet's, or the one this build points at),
+              which never sees your keys.
             </p>
 
             {connected ? (
@@ -138,17 +190,42 @@ export default function WalletButton() {
 
                 {faucetLog.length > 0 && <pre className="faucet-log">{faucetLog.join("\n")}</pre>}
 
-                <button className="btn-glass btn-block" onClick={() => { setSession(null); disconnect(); }}>
-                  Disconnect
+                <button
+                  className="btn-glass btn-block"
+                  onClick={doDisconnect}
+                  title="Stop using this wallet and forget the choice — nothing reconnects on the next load"
+                >
+                  Disconnect{wallet.mode === "local" ? " (keeps the funded wallet for later)" : ""}
                 </button>
+
+                {/* Switching wallets while connected: the extension list stays
+                    reachable so a player on the session wallet can hand over to
+                    Lace without disconnecting first. */}
+                {wallets.length > 0 && (
+                  <div className="wallet-list" style={{ marginTop: 6 }}>
+                    {wallets.map((w) => (
+                      <button key={w.rdns} className="wallet-row" onClick={() => pickWallet(w)}>
+                        {w.icon ? <img src={w.icon} alt="" className="wallet-icon" /> : <span className="wallet-icon ph" />}
+                        <span className="name">Switch to {w.name}</span>
+                        <span className="pay">you pay gas</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             ) : (
               /* ── Not connected: the connect options ── */
               <>
                 {isLocal && (
                   <div className="col" style={{ marginTop: 4 }}>
-                    <button className="btn-glass btn-block" onClick={doFaucet} disabled={faucetRunning}>
-                      {faucetRunning ? "Connecting…" : "🚰 Session Wallet + Auto Faucet"}
+                    <button className="btn-glass btn-block" onClick={doFaucet} disabled={faucetRunning || restoring}>
+                      {restoring
+                        ? "Reconnecting this browser's wallet…"
+                        : faucetRunning
+                          ? "Connecting…"
+                          : hasStoredSessionWallet()
+                            ? "🚰 Reconnect this browser's wallet"
+                            : "🚰 Session Wallet + Auto Faucet"}
                     </button>
                     {faucetLog.length > 0 && <pre className="faucet-log">{faucetLog.join("\n")}</pre>}
                   </div>

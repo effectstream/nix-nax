@@ -15,6 +15,32 @@ export { NETWORK_ID };
 // registers for dust, which then pays gas (undeployed dev only).
 export type WalletMode = "wallet" | "local";
 
+// Which wallet the player last chose, remembered so a reload can put it back.
+// This is a record of an EXPLICIT choice: absent means the player has not
+// picked yet, and nothing should be connected (or built) on their behalf —
+// spinning up the session wallet unasked wastes ~30s and quietly decides for
+// someone who wanted their extension.
+const WALLET_PREF_KEY = "nixnax:wallet-preference";
+export type WalletPreference = "local" | "extension" | null;
+
+export function readWalletPreference(): WalletPreference {
+  try {
+    const v = localStorage.getItem(WALLET_PREF_KEY);
+    return v === "local" || v === "extension" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function rememberWalletPreference(p: WalletPreference): void {
+  try {
+    if (p) localStorage.setItem(WALLET_PREF_KEY, p);
+    else localStorage.removeItem(WALLET_PREF_KEY);
+  } catch {
+    // Storage unavailable — the choice just won't survive the reload.
+  }
+}
+
 export interface WalletState {
   mode: WalletMode | null;
   api: ConnectedAPI | null;
@@ -79,6 +105,7 @@ export async function connect(wallet: InitialAPI): Promise<void> {
     };
     let { addr, dust } = await readDisplayData("");
     set({ mode: "wallet", api, name: wallet.name, address: addr?.unshieldedAddress ?? null, dust, connecting: false });
+    rememberWalletPreference("extension");
     if (!addr || !dust) {
       // One delayed retry — extensions can briefly refuse data right after
       // connect (still unlocking/syncing).
@@ -110,10 +137,14 @@ export async function connect(wallet: InitialAPI): Promise<void> {
 // Reflect it in the shared store so the lobby knows a wallet is ready to play.
 export function connectSessionWallet(address: string): void {
   set({ mode: "local", api: null, name: "Session Wallet + Auto Faucet", address, connecting: false });
+  rememberWalletPreference("local");
 }
 
 export function disconnect(): void {
   set({ mode: null, api: null, name: null, address: null, dust: null });
+  // Forget the choice too, or the next load would reconnect what the player
+  // just walked away from.
+  rememberWalletPreference(null);
   logEvent("wallet: disconnected");
 }
 

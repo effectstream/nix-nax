@@ -7,8 +7,8 @@ import { logEvent } from "../game/log-store.ts";
 
 export type SubmitResult = { via: "local"; txId?: string };
 
-type CreateArgs = { gameId: string; idX: string; rootX: string; rootIdxX: string; rootRndX: string };
-type JoinArgs = { gameId: string; idO: string; rootO: string; rootIdxO: string; rootRndO: string };
+type CreateArgs = { gameId: string; idX: string; rootX: string };
+type JoinArgs = { gameId: string; idO: string; rootO: string };
 
 export async function submitCreateGame(args: CreateArgs): Promise<SubmitResult> {
   const res = await api.createGame(args);

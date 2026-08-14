@@ -1,9 +1,8 @@
 // Blockchain-actions drawer — slides in from the top-left hamburger. Holds the
-// game's on-chain status + every blockchain action (settle/redeem, timeouts,
-// and an Advanced fraud-proof group). Replaces the old right-hand sidebar's
-// StatusPanel + ActionsPanel. Closes on backdrop click, ✕, or Esc.
+// game's on-chain status + the blockchain actions (settle/redeem). Closes on
+// backdrop click, ✕, or Esc.
 
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import type { ContractState } from "../chain/arena.ts";
 import type { PlayerSession } from "../game/player-session.ts";
 import type { ChainActions } from "./useChainActions.ts";
@@ -30,13 +29,6 @@ export interface GameMenuProps {
 }
 
 export default function GameMenu({ open, onClose, session, chain, wsStatus, actions, onLeave }: GameMenuProps) {
-  const [now, setNow] = useState(Math.floor(Date.now() / 1000));
-  useEffect(() => {
-    if (!open) return;
-    const id = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
-    return () => clearInterval(id);
-  }, [open]);
-
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -46,14 +38,10 @@ export default function GameMenu({ open, onClose, session, chain, wsStatus, acti
 
   if (!open) return null;
 
-  const challenge = chain?.hasChallenge ? Math.max(0, Number(chain.challengeUntil) - now) : null;
-  const deadline = chain?.hasDeadline ? Math.max(0, Number(chain.deadline) - now) : null;
   const wsTag = wsStatus === "open" ? "good" : wsStatus === "connecting" ? "warn" : "bad";
   const localWinner = session.winnerLocal;
   const records = session.turnRecords();
   const a = actions;
-  const advanced = a.canProveT || a.canProveI || a.canProveR || a.canProveP;
-  const dispute = a.canChallengeRoll || a.canAnswerRoll || a.canClaimRoll;
 
   return (
     <>
@@ -90,18 +78,6 @@ export default function GameMenu({ open, onClose, session, chain, wsStatus, acti
           </div>
           <div className="k">Committed turns</div>
           <div className="v">{chain?.committedTurns ?? "—"} / local {session.committedTurns}</div>
-          {challenge !== null && (
-            <>
-              <div className="k">Challenge</div>
-              <div className="v">{challenge > 0 ? <span className="tag warn">{challenge}s left</span> : <span className="tag good">expired — redeem</span>}</div>
-            </>
-          )}
-          {deadline !== null && (
-            <>
-              <div className="k">Timeout</div>
-              <div className="v">{deadline > 0 ? <span className="tag warn">{deadline}s left</span> : <span className="tag good">expired — claim</span>}</div>
-            </>
-          )}
         </div>
 
         <div className="section-title">Record the result</div>
@@ -113,39 +89,6 @@ export default function GameMenu({ open, onClose, session, chain, wsStatus, acti
             {a.busy === "Redeem" ? "Redeeming…" : "Redeem (claim result)"}
           </button>
         </div>
-
-        <div className="section-title">If your opponent stalls</div>
-        <div className="col">
-          <button className="btn-glass btn-block" disabled={!a.canStartTimeout || a.busy !== null} onClick={a.startTimeout}>
-            {a.busy === "Start timeout" ? "Arming…" : "Start timeout"}
-          </button>
-          <button className="btn-glass btn-block" disabled={!a.canClaimTimeout || a.busy !== null} onClick={a.claimTimeout}>
-            {a.busy === "Claim timeout" ? "Claiming…" : "Claim timeout (forfeit)"}
-          </button>
-        </div>
-
-        {advanced && (
-          <>
-            <div className="section-title">Fraud proofs (opponent cheated)</div>
-            <div className="col">
-              {a.canProveT && <button className="btn-warn btn-block" disabled={a.busy !== null} onClick={a.proveT}>{a.busy === "Prove action fork" ? "Proving…" : "Prove fraud — action fork"}</button>}
-              {a.canProveI && <button className="btn-warn btn-block" disabled={a.busy !== null} onClick={a.proveI}>{a.busy === "Prove slot fork" ? "Proving…" : "Prove fraud — slot fork"}</button>}
-              {a.canProveR && <button className="btn-warn btn-block" disabled={a.busy !== null} onClick={a.proveR}>{a.busy === "Prove random fork" ? "Proving…" : "Prove fraud — random fork"}</button>}
-              {a.canProveP && <button className="btn-warn btn-block" disabled={a.busy !== null} onClick={a.proveP}>{a.busy === "Prove wrong parity" ? "Proving…" : "Prove fraud — roll-class lie"}</button>}
-            </div>
-          </>
-        )}
-
-        {dispute && (
-          <>
-            <div className="section-title">Roll-class dispute</div>
-            <div className="col">
-              {a.canChallengeRoll && <button className="btn-warn btn-block" disabled={a.busy !== null} onClick={a.challengeRoll}>{a.busy === "Challenge roll" ? "Challenging…" : "Challenge roll — demand evidence for an unseen turn"}</button>}
-              {a.canAnswerRoll && <button className="btn-o btn-block" disabled={a.busy !== null} onClick={a.answerRoll}>{a.busy === "Answer roll challenge" ? "Answering…" : "Answer roll challenge — post the ceremony reveals"}</button>}
-              {a.canClaimRoll && <button className="btn-warn btn-block" disabled={a.busy !== null} onClick={a.claimRoll}>{a.busy === "Claim roll forfeit" ? "Claiming…" : "Claim forfeit — challenge went unanswered"}</button>}
-            </div>
-          </>
-        )}
 
         {records.length > 0 && (
           <>

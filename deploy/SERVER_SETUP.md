@@ -193,9 +193,10 @@ If any fail, check container logs: `docker compose -f deploy/docker/network-comp
 
 ## Step 5 — Deploy the arena contract
 
-One-time per chain. Deploys the contract stub, then installs 16 verifier
-keys — **17 transactions, expect ~10 minutes**. Writes the contract address
-to `webapp/public/arena.json`, which the browser reads at runtime.
+One-time per chain. Deploys the contract stub, then installs 4 verifier
+keys (`createGame`, `joinGame`, `settle`, `claimResult`) — **5 transactions,
+expect a few minutes**. Writes the contract address to
+`webapp/public/arena.json`, which the browser reads at runtime.
 
 ```bash
 sudo -iu nixnax bash -lc 'cd /srv/nixnax && bun run deploy'
@@ -414,7 +415,7 @@ then ignore its node/indexer, or run just a proof-server 8.1.0 at :6300):
 | Deploy hangs at `[wallet sync …]` | Normal for ~30 s; if minutes, the indexer isn't healthy — `docker compose -f deploy/docker/network-compose.yml logs indexer`. |
 | `gameId already exists` in tests/games after a chain reset | Stale persisted address: delete `nixnax.undeployed.json` and re-run `bun run deploy`. |
 | Browser: faucet fails with `1010 … Custom error 192` | Known dev-chain dust-registration constraint; the app falls back to the genesis wallet as gas payer automatically. |
-| First `settle` of a game with a **single move** rejected: `Malformed(…FeeCalculation)` | Known dev-node fee-model edge (wallet/node disagreement for the smallest settle tx) — not a contract bug. Play/submit ≥ 2 moves; details in `test/e2e/timeout.test.ts`. |
+| A `settle` carrying a **single move** rejected: `Malformed(…FeeCalculation)` | Known dev-node fee-model edge (wallet/node disagreement for the smallest settle tx) — not a contract bug. Play/submit ≥ 2 moves; the client chunker already avoids 1-move chunks. See "Known issues" in the README. |
 | Site loads but wallet/faucet stalls remotely | The bundle was built with localhost endpoints, or ports 8088/9944/6300 are firewalled. Redo Step 7 + Step 8's firewall, rebuild. |
 | ZK asset 404s (`/contract/compiled/nixnax-arena/...`) | `src/contract/managed/` missing (Step 3 not run) or nginx `alias` path wrong. |
 | Everything broke after reboot | The chain stack wasn't systemd-managed: `sudo systemctl start nixnax-stack` (or `bun run stack:up`), then `bun run deploy` reuses the arena. Chain state persists; if the chain was wiped, redeploy and rebuild is NOT needed (arena.json is runtime-fetched, only `deploy` must re-run). |

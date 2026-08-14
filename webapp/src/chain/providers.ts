@@ -92,7 +92,7 @@ export function buildBrowserProviders(opts: {
 // the reference midnight-wallet-dapp buildProvidersFromConnectedAPI: read the
 // wallet's own config (endpoints) + shielded address, wrap it into a
 // wallet/midnight provider, and let the normal `found.callTx.*` flow run — the
-// browser proves, the wallet balances the dust + signs + submits.
+// proof server proves, the wallet balances the dust + signs + submits.
 export async function buildConnectorProviders(opts: {
   api: ConnectedAPI;
   privateStateStoreName?: string;

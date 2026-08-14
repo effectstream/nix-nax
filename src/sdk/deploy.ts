@@ -79,17 +79,10 @@ export interface ArenaHandle {
 
 // Deploy (or reuse) the arena and return a CACHED call handle. Safe to call
 // once at service boot; per-call attach is no longer needed.
-// Default minimum challenge/timeout/response window (block-time seconds), set
-// at deployment into the contract's sealed `minWindowSecs`. 600 = 10 min is a
-// sane production floor; the e2e driver overrides it with a small value so the
-// suite doesn't wait out real 10-minute windows.
-export const DEFAULT_MIN_WINDOW_SECS = 600n;
-
 export async function ensureArenaDeployed(opts: {
   wallet: WalletBundle;
   privateStateStoreName?: string;
   midnightDbName?: string;
-  minWindowSecs?: bigint;
   // Override the persisted-deployment path — lets an isolated caller (e2e) keep
   // its own short-window arena separate from the main/webapp deployment.
   deploymentFile?: string;
@@ -131,7 +124,7 @@ export async function ensureArenaDeployed(opts: {
       compiledContract: makeCompiledStub() as any,
       privateStateId: DEFAULT_PRIVATE_STATE_ID as any,
       initialPrivateState: createNixNaxPrivateState(new Uint8Array(32)) as any,
-      args: [opts.minWindowSecs ?? DEFAULT_MIN_WINDOW_SECS],
+      args: [],
     } as any);
     contractAddress = (deployed as any).deployTxData.public.contractAddress as string;
     log.info(`Deployed (no circuits yet) at ${contractAddress}`);

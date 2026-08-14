@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "NixNax: a trustless 4x4 stacked-pieces state-channel game on Midnight — off-chain play, on-chain settlement with equivocation fraud proofs, a roll-class dispute, and timeout forfeit.",
+  "description": "NixNax (simplified teaching edition): a 4x4 stacked-pieces game on Midnight — off-chain play, on-chain settlement, shielded win-token. Trusts the players; the trustless version lives at the `advanced` tag.",
+  "license": "MIT OR Apache-2.0",
   "engines": {
     "bun": ">=1.1"
   },

@@ -109,8 +109,6 @@ export default function Home({ onOpen }: HomeProps) {
         gameId: gidHex,
         idX: hex(x.id),
         rootX: "0x" + x.tokenTree.root.field.toString(16),
-        rootIdxX: "0x" + x.indexTree.root.field.toString(16),
-        rootRndX: "0x" + x.randomTree.root.field.toString(16),
       });
       logEvent(`create-game: submitted via ${res.via}${res.txId ? ` (tx ${res.txId.slice(0, 16)}…)` : ""}`);
       const xSession = new PlayerSession("x", gidHex, x, null);
@@ -151,8 +149,6 @@ export default function Home({ onOpen }: HomeProps) {
           gameId: gidHex,
           idO: myIdHex,
           rootO: "0x" + o.tokenTree.root.field.toString(16),
-          rootIdxO: "0x" + o.indexTree.root.field.toString(16),
-          rootRndO: "0x" + o.randomTree.root.field.toString(16),
         });
         logEvent(`join: submitted via ${r.via}${r.txId ? ` (tx ${r.txId.slice(0, 16)}…)` : ""}`);
       } catch (e) {
@@ -202,7 +198,7 @@ export default function Home({ onOpen }: HomeProps) {
           <h1 className="title">Nix-Nax</h1>
           <p className="muted">
             A{" "}
-            <Term word="trustless" tip="No referee or central server to trust — the rules are enforced on-chain by the contract and cryptographic proofs, so neither player can cheat or be cheated." />{" "}
+            <Term word="friendly" tip="This simplified contract trusts the two players not to cheat: it still enforces every board rule and checks each move's committed token, but the anti-cheat machinery (fraud proofs, disputes, timeouts) is left out to keep it readable. The complete, fully trustless version lives at the `advanced` git tag." />{" "}
             game implemented in{" "}
             <Term word="Midnight" tip="A privacy-focused blockchain that runs smart contracts with zero-knowledge proofs — keeping data confidential while still publicly verifiable." />{" "}
             with{" "}

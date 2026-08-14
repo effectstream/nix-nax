@@ -1,8 +1,7 @@
 /**
  * Upgrade a DEPLOYED NixNaxArena in place: install verifier keys for circuits
- * the deployment doesn't have yet (e.g. the settle2/settle11 variants added
- * after the original deploy). The arena address, all open games, and every
- * existing circuit stay untouched — this only ADDS entry points.
+ * the deployment doesn't have yet. The arena address, all open games, and
+ * every existing circuit stay untouched — this only ADDS entry points.
  *
  * Requirements:
  *   * Run on the SAME machine (and repo) that deployed the arena: maintenance

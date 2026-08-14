@@ -1,26 +1,18 @@
 // All on-chain actions + their eligibility, as a hook. Shared by the
 // blockchain-actions drawer (GameMenu) and the win overlay so the settle /
-// claim / timeout / fraud logic lives in exactly one place. Lifted verbatim
-// from the old ActionsPanel; logging now goes to the JS console via logEvent.
+// claim logic lives in exactly one place. Logging goes to the JS console via
+// logEvent.
+//
+// SIMPLIFIED (teaching) version: the contract trusts the players, so the
+// fraud / dispute / timeout actions are gone and there is no challenge
+// window — a decided game is redeemable immediately.
 
 import { useState } from "react";
 import { api, type ContractState } from "../chain/arena.ts";
-import { encodePath } from "../../../src/sdk/game/messaging.ts";
-import { MIN_CHALLENGE_SECS, MIN_TIMEOUT_SECS, MIN_RESPONSE_SECS } from "../../../src/sdk/game/rules.ts";
 import { logEvent } from "../game/log-store.ts";
 import type { PlayerSession } from "../game/player-session.ts";
 
 const hex = (b: Uint8Array) => Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("");
-
-// Seconds between COMPUTING a window timestamp (untilTime/deadline/respondBy)
-// and the tx actually LANDING on-chain. The contract asserts the window still
-// clears now + minWindowSecs at land time — and in-browser proving of the k=17
-// settle plus a wallet-approval prompt takes minutes, so the old 120s buffer
-// produced "challenge window too short" SegmentFails on a live network. The
-// cost of a bigger buffer is a longer wait before Redeem; the cost of a small
-// one is a burned fee and a failed settle. 600s covers slow proving + a human
-// sitting on the wallet prompt.
-const TX_LANDING_BUFFER_SECS = 600;
 
 // midnight-js throws the raw FinalizedTxData JSON when a landed tx's fallible
 // segment fails on-chain. Translate it for the UI; the raw JSON still goes to
@@ -28,7 +20,7 @@ const TX_LANDING_BUFFER_SECS = 600;
 function friendlyTxError(msg: string): string {
   if (msg.includes("SegmentFail") || msg.includes("FailFallible")) {
     return "The transaction landed on-chain but a contract check rejected it (segment failed). " +
-      "If this was a settle/timeout, its time window likely went stale while proving — try again.";
+      "The on-chain state may have moved while proving — refresh and try again.";
   }
   return msg;
 }
@@ -42,26 +34,8 @@ export interface ChainActions {
   settled: boolean;
   canSettle: boolean;
   canClaimResult: boolean;
-  canStartTimeout: boolean;
-  canClaimTimeout: boolean;
-  canProveT: boolean;
-  canProveI: boolean;
-  canProveR: boolean;
-  canProveP: boolean;
-  canChallengeRoll: boolean;
-  canAnswerRoll: boolean;
-  canClaimRoll: boolean;
   settle: () => void;
   claimResult: () => void;
-  startTimeout: () => void;
-  claimTimeout: () => void;
-  proveT: () => void;
-  proveI: () => void;
-  proveR: () => void;
-  proveP: () => void;
-  challengeRoll: () => void;
-  answerRoll: () => void;
-  claimRoll: () => void;
 }
 
 export function useChainActions(
@@ -80,50 +54,14 @@ export function useChainActions(
   const canSettle =
     !settled && !halfOpen && !chainDecided &&
     session.committedTurns > (chain?.committedTurns ?? 0);
-  const challengeOpen = !!chain?.hasChallenge;
-  const challengeExpired =
-    challengeOpen && Number(chain!.challengeUntil) <= Math.floor(Date.now() / 1000);
   // A decided game (winner x=1 / o=2) can only be finalised by the winner — who
-  // mints the win-token. A draw / undecided settlement is finalisable by either
-  // participant (no mint). So hide "Redeem" from the loser.
+  // mints the win-token. A draw is finalisable by either participant (no mint).
+  // So hide "Redeem" from the loser. No waiting window in this version.
   const myMark = session.role === "x" ? 1 : 2;
   const decidedWinner = chain?.winner === 1 || chain?.winner === 2;
   const iWon = decidedWinner && chain?.winner === myMark;
-  // Roll-class dispute state (see challengeRoll/answerRoll/claimRoll below).
-  const rollPending = !!chain?.hasRollChallenge;
-  const unseenTurn = chain && !settled ? session.detectUnseenRoll(chain.actionLog ?? []) : null;
-  const answerPayload =
-    rollPending && (chain!.challengeTurn % 2 === 0 ? 1 : 2) === myMark
-      ? session.rollAnswerFor(chain!.challengeTurn)
-      : null;
-  const respondExpired =
-    rollPending && Number(chain!.respondBy) <= Math.floor(Date.now() / 1000);
-  // Finalisable once decided (win or draw) with no window pending: optimistic
-  // wins wait out the challenge window; fraud/timeout wins carry no window and
-  // finalise immediately. A pending roll dispute blocks it either way.
-  const windowClear = !challengeOpen || challengeExpired;
   const canClaimResult =
-    !settled && !halfOpen && chainDecided && windowClear && !rollPending &&
-    (!decidedWinner || iWon);
-  const deadlineExpired =
-    !!chain?.hasDeadline && Number(chain.deadline) <= Math.floor(Date.now() / 1000);
-  const canClaimTimeout = !settled && !halfOpen && deadlineExpired;
-  const canStartTimeout =
-    !settled && !halfOpen && !chainDecided &&
-    !!chain && !chain.hasDeadline && chain.committedTurns > 0 &&
-    chain.turnMark !== (session.role === "x" ? 1 : 2);
-
-  const fraudT = session.detectEquivocation();
-  const fraudI = session.detectIndexEquivocation();
-  const fraudR = session.detectRandomEquivocation();
-  const fraudP = chain ? session.detectWrongParity(chain.actionLog ?? []) : null;
-  const canProveT = !settled && !halfOpen && !!fraudT;
-  const canProveI = !settled && !halfOpen && !!fraudI;
-  const canProveR = !settled && !halfOpen && !!fraudR;
-  const canProveP = !settled && !halfOpen && !!fraudP;
-  const canChallengeRoll = !settled && !halfOpen && !rollPending && unseenTurn !== null;
-  const canAnswerRoll = !settled && !halfOpen && rollPending && !!answerPayload;
-  const canClaimRoll = !settled && !halfOpen && rollPending && respondExpired;
+    !settled && !halfOpen && chainDecided && (!decidedWinner || iWon);
 
   const wrap = (label: string, fn: () => Promise<unknown>) => () => {
     setError(null);
@@ -144,28 +82,18 @@ export function useChainActions(
     })();
   };
 
-  const side = (): "x" | "o" => (session.role === "x" ? "o" : "x"); // fraud is by the opponent
-
   return {
     busy, status, error, settled,
-    canSettle, canClaimResult, canStartTimeout, canClaimTimeout,
-    canProveT, canProveI, canProveR, canProveP,
-    canChallengeRoll, canAnswerRoll, canClaimRoll,
+    canSettle, canClaimResult,
 
     settle: wrap("Submit", async () => {
       const from = chain?.committedTurns ?? 0;
-      const chunks = session.settleChunkPayloads(from, 0);
+      const chunks = session.settleChunkPayloads(from);
       if (chunks.length === 0) { logEvent("settle: nothing to extend"); return; }
       logEvent(`settle: ${session.committedTurns - from} move(s) in ${chunks.length} chunk(s)…`);
       for (let i = 0; i < chunks.length; i++) {
-        setStatus(`Proving settle chunk ${i + 1}/${chunks.length} (settle${chunks[i].variant}, ${chunks[i].nMoves} move${chunks[i].nMoves === 1 ? "" : "s"}) — bigger chunks take a few minutes. Approve each tx in your wallet…`);
-        // Fresh timestamp PER CHUNK, taken right before proving starts: the
-        // contract checks untilTime > blockTime + minWindowSecs when the tx
-        // LANDS, and each chunk spends minutes in proving + wallet approval. A
-        // single click-time stamp shared by all chunks goes stale (SegmentFail
-        // "challenge window too short").
-        const untilTime = String(Math.floor(Date.now() / 1000) + MIN_CHALLENGE_SECS + TX_LANDING_BUFFER_SECS);
-        const r = await api.settle({ gameId: session.gameId, secret: hex(session.keys.secret), ...chunks[i], untilTime });
+        setStatus(`Proving settle chunk ${i + 1}/${chunks.length} (${chunks[i].nMoves} move${chunks[i].nMoves === 1 ? "" : "s"}) — this takes a few minutes. Approve each tx in your wallet…`);
+        const r = await api.settle({ gameId: session.gameId, ...chunks[i] });
         logEvent(`settle chunk ${i + 1}/${chunks.length}: tx ${r.txId}`);
       }
     }),
@@ -173,83 +101,6 @@ export function useChainActions(
     claimResult: wrap("Redeem", async () => {
       const r = await api.claimResult(session.gameId, hex(session.keys.secret));
       logEvent(`claim-result: tx ${r.txId}`);
-    }),
-
-    startTimeout: wrap("Start timeout", async () => {
-      const untilTime = String(Math.floor(Date.now() / 1000) + MIN_TIMEOUT_SECS + TX_LANDING_BUFFER_SECS);
-      const r = await api.startTimeout(session.gameId, hex(session.keys.secret), untilTime);
-      logEvent(`start-timeout: tx ${r.txId}`);
-    }),
-
-    claimTimeout: wrap("Claim timeout", async () => {
-      const r = await api.claimTimeout(session.gameId);
-      logEvent(`claim-timeout: tx ${r.txId}`);
-    }),
-
-    proveT: wrap("Prove action fork", async () => {
-      const p = fraudT!;
-      const r = await api.proveFraud({
-        gameId: session.gameId, side: side(), turn: p.turn,
-        kindA: p.kindA, cellA: p.cellA, sizeA: p.sizeA, secretA: hex(p.secretA), pathA: encodePath(p.pathA),
-        kindB: p.kindB, cellB: p.cellB, sizeB: p.sizeB, secretB: hex(p.secretB), pathB: encodePath(p.pathB),
-      });
-      logEvent(`prove-fraud: tx ${r.txId}`);
-    }),
-
-    proveI: wrap("Prove slot fork", async () => {
-      const p = fraudI!;
-      const r = await api.proveIndexFraud({
-        gameId: session.gameId, side: side(), turn: p.turn,
-        slotA: p.slotA, bitsA: p.bitsA, secretA: hex(p.secretA), pathA: encodePath(p.pathA),
-        slotB: p.slotB, bitsB: p.bitsB, secretB: hex(p.secretB), pathB: encodePath(p.pathB),
-      });
-      logEvent(`prove-index-fraud: tx ${r.txId}`);
-    }),
-
-    proveR: wrap("Prove random fork", async () => {
-      const p = fraudR!;
-      const r = await api.proveRandomFraud({
-        gameId: session.gameId, side: side(), turn: p.turn, slot: p.slot,
-        bitsA: p.bitsA, randomA: hex(p.randomA), pathA: encodePath(p.pathA),
-        bitsB: p.bitsB, randomB: hex(p.randomB), pathB: encodePath(p.pathB),
-      });
-      logEvent(`prove-random-fraud: tx ${r.txId}`);
-    }),
-
-    proveP: wrap("Prove wrong parity", async () => {
-      const p = fraudP!;
-      const r = await api.proveWrongParity({
-        gameId: session.gameId, turn: p.turn, slot: p.slot,
-        bitsI: p.bitsI, secretI: hex(p.secretI), pathI: encodePath(p.pathI),
-        bitsR: p.bitsR, randomR: hex(p.randomR), pathR: encodePath(p.pathR),
-      });
-      logEvent(`prove-wrong-parity: tx ${r.txId}`);
-    }),
-
-    // Demand the roll evidence for a committed opponent turn this client never
-    // saw the ceremony for (unilateral settle). The mover must answer on-chain
-    // before respondBy or forfeit via claimRoll.
-    challengeRoll: wrap("Challenge roll", async () => {
-      const respondBy = String(Math.floor(Date.now() / 1000) + MIN_RESPONSE_SECS + TX_LANDING_BUFFER_SECS);
-      const r = await api.challengeRoll(session.gameId, hex(session.keys.secret), unseenTurn!, respondBy);
-      logEvent(`challenge-roll: turn ${unseenTurn} — tx ${r.txId}`);
-    }),
-
-    // Answer a pending challenge on my own turn with the ceremony reveals.
-    answerRoll: wrap("Answer roll challenge", async () => {
-      const p = answerPayload!;
-      const r = await api.answerRollChallenge({
-        gameId: session.gameId, slot: p.slot,
-        bitsI: p.bitsI, secretI: hex(p.secretI), pathI: encodePath(p.pathI),
-        bitsR: p.bitsR, randomR: hex(p.randomR), pathR: encodePath(p.pathR),
-      });
-      logEvent(`answer-roll-challenge: turn ${chain!.challengeTurn} — tx ${r.txId}`);
-    }),
-
-    // The challenge went unanswered past respondBy: claim the forfeit.
-    claimRoll: wrap("Claim roll forfeit", async () => {
-      const r = await api.claimRollChallenge(session.gameId);
-      logEvent(`claim-roll-challenge: tx ${r.txId}`);
     }),
   };
 }
