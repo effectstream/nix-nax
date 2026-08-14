@@ -68,7 +68,9 @@ Open **http://localhost:5173**, click the **Wallet** button (top-right) and use 
 
 For a two-human game, both browsers point at the same relay + the same `arena.json`; one player creates a game and shares the **game id**, the other joins with it. Tear everything down with `bun run stack:down`.
 
-> **Serverless by design.** There is no backend that holds keys or submits transactions. The **browser** builds, proves, and submits every on-chain call through an in-browser Midnight wallet, and pays its own gas. The relay only shuttles off-chain messages between the two players.
+> **No game backend.** Nothing server-side holds keys, owns game state, or submits transactions: the **browser** builds every on-chain call through an in-browser Midnight wallet, signs it, submits it to the node, and pays its own gas. The relay only shuttles off-chain messages between the two players.
+>
+> It is *not* dependency-free, though. Two external services are required, and both are in the Quickstart above: a **node** (+ indexer) to talk to the chain, and a **proof server** that actually generates the zero-knowledge proofs — the browser hands it the unproven transaction over HTTP (`httpClientProofProvider`) and gets the proof back. A connected extension wallet may supply its own proof server, in which case that one is used. The proof server sees the transaction's witness data but never your wallet keys, which is why it is normally run locally or by your wallet rather than by whoever hosts the site.
 
 ---
 
@@ -139,10 +141,10 @@ src/contract/      NixNaxArena.compact — the on-chain "arena" (hosts many game
 src/sdk/           TypeScript SDK
   crypto/            persistent hash, the three Merkle trees, signed-move ceremony
   game/              rules + shared move/messaging codecs
-  wallet, providers  in-browser Midnight wiring (build / prove / submit)
+  wallet, providers  in-browser Midnight wiring (build / balance / submit; proofs via proof server)
 scripts/           stack-up · stack-down · deploy
 relay/             message-only WebSocket switchboard (server.ts)
-webapp/            Vite + React client — builds, proves, and submits in the browser
+webapp/            Vite + React client — builds and submits in the browser (proof server does the proving)
 test/              contract.sim + crypto (unit) · e2e/ (live-stack)
 ```
 

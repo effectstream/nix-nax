@@ -219,7 +219,10 @@ input[type="text"]::placeholder { color: #5d6b86; }
 .wallet-dot.wallet { background: var(--good); box-shadow: 0 0 8px rgba(84, 224, 154, 0.7); }
 .wallet-dot.local { background: var(--warn); box-shadow: 0 0 8px rgba(255, 206, 107, 0.6); }
 
-.wallet-modal { text-align: left; }
+/* Wider than the other modals: this one carries the faucet log, whose lines
+   are long (addresses, tx hashes, NIGHT amounts) and unreadable when wrapped
+   every few characters. */
+.wallet-modal { width: min(560px, 94vw); text-align: left; }
 .wallet-modal .modal-title { text-align: left; }
 .wallet-list { display: flex; flex-direction: column; gap: 10px; margin: 6px 0 4px; }
 .wallet-row { display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--glass-border); background: rgba(255, 255, 255, 0.04); text-align: left; }
@@ -232,7 +235,10 @@ input[type="text"]::placeholder { color: #5d6b86; }
 .wallet-addr-full { font-size: 11px; color: var(--fg-1); word-break: break-all; margin: 6px 0 2px; }
 .wallet-net-note { margin: 16px 0 0; padding-top: 14px; border-top: 1px solid var(--glass-border); font-size: 12px; color: var(--fg-1); text-align: center; }
 .wallet-net-note strong { color: var(--o); text-transform: uppercase; letter-spacing: 0.5px; }
-.faucet-log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: rgba(0,0,0,0.35); border: 1px solid var(--glass-border); font-size: 11px; line-height: 1.5; color: var(--fg-1); white-space: pre-wrap; word-break: break-all; max-height: 160px; overflow-y: auto; }
+/* `overflow-wrap: anywhere` (not `word-break: break-all`) so lines break at
+   spaces first and only split inside a token when it genuinely cannot fit —
+   break-all chopped ordinary words mid-syllable ("wa/iting"). */
+.faucet-log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: rgba(0,0,0,0.35); border: 1px solid var(--glass-border); font-size: 12px; line-height: 1.6; color: var(--fg-1); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow-y: auto; }
 
 /* ── Turn die (bottom-right) ──────────────────────────────────────────────── */
 .die-stage { position: absolute; right: 26px; bottom: 26px; z-index: 16; display: flex; flex-direction: column; align-items: center; gap: 10px; pointer-events: none; }

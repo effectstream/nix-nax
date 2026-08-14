@@ -1,8 +1,9 @@
-// Client-side arena (contract) module — every action is built, proven,
-// balanced, and submitted in the browser via the in-browser gas wallet (see
-// wallet/local-wallet.ts); no relay. Exposes an `api`-shaped object so the
-// consumers (submit.ts, useChainActions.ts, GameView, Home) just swap their
-// import.
+// Client-side arena (contract) module — every action is built, balanced, and
+// submitted in the browser via the in-browser gas wallet (see
+// wallet/local-wallet.ts); the ZK proof itself comes from the configured proof
+// server (httpClientProofProvider, see providers.ts). No relay. Exposes an
+// `api`-shaped object so the consumers (submit.ts, useChainActions.ts,
+// GameView, Home) just swap their import.
 //
 // SIMPLIFIED (teaching) contract: createGame/joinGame carry the player
 // identity + ONE Merkle root (the token tree), settle carries the moves with
