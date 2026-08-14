@@ -1,11 +1,13 @@
-// Client-side arena (contract) module — the serverless replacement for
-// webapp/src/api/http.ts. Every action is built, proven, balanced, and submitted
-// in the browser via the in-browser gas wallet (see wallet/local-wallet.ts); no
-// relay. Exposes an `api`-shaped object so the consumers (submit.ts,
-// useChainActions.ts, GameView, Home) just swap their import.
+// Client-side arena (contract) module — every action is built, proven,
+// balanced, and submitted in the browser via the in-browser gas wallet (see
+// wallet/local-wallet.ts); no relay. Exposes an `api`-shaped object so the
+// consumers (submit.ts, useChainActions.ts, GameView, Home) just swap their
+// import.
 //
-// Codecs + the per-action argument order are ported verbatim from the old
-// relay/server.ts so the on-chain calls are byte-identical.
+// SIMPLIFIED (teaching) contract: createGame/joinGame carry the player
+// identity + ONE Merkle root (the token tree), settle carries the moves with
+// their one-time token reveals, and the fraud / dispute / timeout calls are
+// gone.
 
 import { findDeployedContract } from "@midnight-ntwrk/midnight-js-contracts";
 import { encodeCoinPublicKey, rawTokenType } from "@midnight-ntwrk/compact-runtime";
@@ -18,7 +20,7 @@ import { getGasWallet } from "../wallet/local-wallet.ts";
 import { walletApi } from "../wallet/useWallet.ts";
 import { logEvent } from "../game/log-store.ts";
 
-// ── Wire types (identical to the old api/http.ts) ───────────────────────────
+// ── Wire types ───────────────────────────────────────────────────────────────
 export type WirePath = { leaf: string; path: { sibling: string; goes_left: boolean }[] };
 
 export interface ContractState {
@@ -32,19 +34,8 @@ export interface ContractState {
   idO: string;
   rootX: string;
   rootO: string;
-  rootIdxX: string;
-  rootIdxO: string;
-  rootRndX: string;
-  rootRndO: string;
   committedTurns: number;
   turnMark: number;
-  hasChallenge: boolean;
-  challengeUntil: string;
-  hasDeadline: boolean;
-  deadline: string;
-  hasRollChallenge: boolean;
-  challengeTurn: number;
-  respondBy: string;
   board: number[];
   tops: number[];
   reserves: Record<string, number>;
@@ -53,21 +44,15 @@ export interface ContractState {
 
 export interface SettleChunkBody {
   gameId: string;
-  secret: string;
-  // Which settle entry point this chunk targets (array lengths must match):
-  // 2 → settle2, 8 → settle, 11 → settle11. Absent = 8 (legacy callers).
-  variant?: number;
   nMoves: number;
-  parities: number[];
-  kinds: number[];
+  kinds: number[];   // padded to 8
   cells: number[];
   sizes: number[];
-  secrets: string[];
-  paths: WirePath[];
-  untilTime: string;
+  secrets: string[]; // per-move token secrets (hex), zero-padded
+  paths: WirePath[]; // per-move token Merkle paths, zero-padded
 }
 
-// ── Codecs (ported from relay/server.ts) ────────────────────────────────────
+// ── Codecs ───────────────────────────────────────────────────────────────────
 const fromHex = (s: string): Uint8Array => {
   const h = (s.startsWith("0x") ? s.slice(2) : s).match(/.{1,2}/g) ?? [];
   return new Uint8Array(h.map((b) => parseInt(b, 16)));
@@ -80,10 +65,6 @@ const gid = (s: string): Uint8Array => {
   if (b.length !== 32) throw new Error("gameId must be 32 bytes of hex");
   return b;
 };
-const bits4 = (xs: number[]): [bigint, bigint, bigint, bigint] => {
-  if (!Array.isArray(xs) || xs.length !== 4) throw new Error("bits must be a 4-element array");
-  return [BigInt(xs[0]), BigInt(xs[1]), BigInt(xs[2]), BigInt(xs[3])];
-};
 const toBig = (xs: number[]) => xs.map((v) => BigInt(v));
 function decodePath(p: WirePath): { leaf: Uint8Array; path: { sibling: { field: bigint }; goes_left: boolean }[] } {
   return {
@@ -94,8 +75,8 @@ function decodePath(p: WirePath): { leaf: Uint8Array; path: { sibling: { field: 
 const txIdOf = (tx: any): string => String(tx.public.txId);
 
 // ── Submit serialization: one gas wallet → one nonce/UTXO stream → one queue.
-// (Matches the relay's withLock; matters in single-tab vs-AI where the human and
-// the AI both submit through the same wallet.)
+// (Matters in single-tab vs-AI where the human and the AI both submit through
+// the same wallet.)
 let queue: Promise<unknown> = Promise.resolve();
 function withLock<T>(fn: () => Promise<T>): Promise<T> {
   const run = queue.then(fn, fn);
@@ -172,7 +153,7 @@ export function resetArena(): void {
   handleP = null;
 }
 
-// A separate handle with the caller's secret in private state — startTimeout
+// A separate handle with the caller's secret in private state — claimResult
 // consumes the localSecret witness (mirrors src/sdk/deploy.ts attachWithSecret).
 async function attachWithSecret(secret: Uint8Array): Promise<{ found: any }> {
   const addr = await arenaAddress();
@@ -189,7 +170,7 @@ async function attachWithSecret(secret: Uint8Array): Promise<{ found: any }> {
   return { found };
 }
 
-// ── On-chain state read (ported from relay /api/state) ──────────────────────
+// ── On-chain state read ──────────────────────────────────────────────────────
 async function readState(gameId: string): Promise<ContractState> {
   const { providers, addr } = await attach();
   const g = gid(gameId);
@@ -237,19 +218,8 @@ async function readState(gameId: string): Promise<ContractState> {
     idO: toHex(keys.idO),
     rootX: "0x" + keys.rootX.field.toString(16),
     rootO: "0x" + keys.rootO.field.toString(16),
-    rootIdxX: "0x" + keys.rootIdxX.field.toString(16),
-    rootIdxO: "0x" + keys.rootIdxO.field.toString(16),
-    rootRndX: "0x" + keys.rootRndX.field.toString(16),
-    rootRndO: "0x" + keys.rootRndO.field.toString(16),
     committedTurns: Number(dyn.committedTurns),
     turnMark: Number(dyn.turnMark),
-    hasChallenge: dyn.hasChallenge,
-    challengeUntil: dyn.challengeUntil.toString(),
-    hasDeadline: dyn.hasDeadline,
-    deadline: dyn.deadline.toString(),
-    hasRollChallenge: dyn.hasRollChallenge,
-    challengeTurn: Number(dyn.challengeTurn),
-    respondBy: dyn.respondBy.toString(),
     board,
     tops,
     reserves,
@@ -305,32 +275,28 @@ export async function readWinBalance(): Promise<number> {
   }
 }
 
-// ── Public API (mirrors webapp/src/api/http.ts `api`) ───────────────────────
+// ── Public API ───────────────────────────────────────────────────────────────
 export const api = {
   health: async (): Promise<{ ok: true; arena?: string }> => ({ ok: true, arena: await arenaAddress() }),
 
-  createGame: (args: { gameId: string; idX: string; rootX: string; rootIdxX: string; rootRndX: string }) =>
+  createGame: (args: { gameId: string; idX: string; rootX: string }) =>
     withLock(async () => {
       const { found } = await attach();
       const tx = await found.callTx.createGame(
         gid(args.gameId),
         fromHex(args.idX),
         { field: fieldBig(args.rootX) },
-        { field: fieldBig(args.rootIdxX) },
-        { field: fieldBig(args.rootRndX) },
       );
       return { ok: true as const, txId: txIdOf(tx), gameId: args.gameId };
     }),
 
-  join: (args: { gameId: string; idO: string; rootO: string; rootIdxO: string; rootRndO: string }) =>
+  join: (args: { gameId: string; idO: string; rootO: string }) =>
     withLock(async () => {
       const { found } = await attach();
       const tx = await found.callTx.joinGame(
         gid(args.gameId),
         fromHex(args.idO),
         { field: fieldBig(args.rootO) },
-        { field: fieldBig(args.rootIdxO) },
-        { field: fieldBig(args.rootRndO) },
       );
       return { ok: true as const, txId: txIdOf(tx) };
     }),
@@ -340,27 +306,17 @@ export const api = {
   settle: (body: SettleChunkBody) =>
     withLock(async () => {
       const { found } = await attach();
-      const variant = body.variant ?? 8;
-      const entry =
-        variant === 2 ? found.callTx.settle2 :
-        variant === 11 ? found.callTx.settle11 :
-        found.callTx.settle;
-      if (variant !== 2 && variant !== 8 && variant !== 11) {
-        throw new Error(`unknown settle variant ${variant} (expected 2, 8, or 11)`);
+      if (body.kinds.length !== 8) {
+        throw new Error("settle: payload arrays must have length 8");
       }
-      if (body.parities.length !== variant) {
-        throw new Error(`settle${variant === 8 ? "" : variant}: payload arrays must have length ${variant}`);
-      }
-      const tx = await entry(
+      const tx = await found.callTx.settle(
         gid(body.gameId),
         BigInt(body.nMoves),
-        toBig(body.parities),
         toBig(body.kinds),
         toBig(body.cells),
         toBig(body.sizes),
         body.secrets.map(fromHex),
         body.paths.map(decodePath),
-        BigInt(body.untilTime),
       );
       return { ok: true as const, txId: txIdOf(tx) };
     }),
@@ -379,115 +335,6 @@ export const api = {
         : ((await getGasWallet()) as any).zswapSecretKeys.coinPublicKey;
       const recipient = { bytes: encodeCoinPublicKey(coinPk as any) };
       const tx = await found.callTx.claimResult(gid(gameId), recipient);
-      return { ok: true as const, txId: txIdOf(tx) };
-    }),
-
-  startTimeout: (gameId: string, secret: string, untilTime: string) =>
-    withLock(async () => {
-      const { found } = await attachWithSecret(fromHex(secret));
-      const tx = await found.callTx.startTimeout(gid(gameId), BigInt(untilTime));
-      return { ok: true as const, txId: txIdOf(tx) };
-    }),
-
-  claimTimeout: (gameId: string) =>
-    withLock(async () => {
-      const { found } = await attach();
-      const tx = await found.callTx.claimTimeout(gid(gameId));
-      return { ok: true as const, txId: txIdOf(tx) };
-    }),
-
-  proveFraud: (body: {
-    gameId: string; side: "x" | "o"; turn: number;
-    kindA: number; cellA: number; sizeA: number; secretA: string; pathA: WirePath;
-    kindB: number; cellB: number; sizeB: number; secretB: string; pathB: WirePath;
-  }) =>
-    withLock(async () => {
-      const { found } = await attach();
-      const fn = body.side === "x" ? "proveEquivocationByX" : "proveEquivocationByO";
-      const tx = await found.callTx[fn](
-        gid(body.gameId), BigInt(body.turn),
-        BigInt(body.kindA), BigInt(body.cellA), BigInt(body.sizeA), fromHex(body.secretA), decodePath(body.pathA),
-        BigInt(body.kindB), BigInt(body.cellB), BigInt(body.sizeB), fromHex(body.secretB), decodePath(body.pathB),
-      );
-      return { ok: true as const, txId: txIdOf(tx) };
-    }),
-
-  proveIndexFraud: (body: {
-    gameId: string; side: "x" | "o"; turn: number;
-    slotA: number; bitsA: number[]; secretA: string; pathA: WirePath;
-    slotB: number; bitsB: number[]; secretB: string; pathB: WirePath;
-  }) =>
-    withLock(async () => {
-      const { found } = await attach();
-      const fn = body.side === "x" ? "proveIndexEquivocationByX" : "proveIndexEquivocationByO";
-      const tx = await found.callTx[fn](
-        gid(body.gameId), BigInt(body.turn),
-        BigInt(body.slotA), ...bits4(body.bitsA), fromHex(body.secretA), decodePath(body.pathA),
-        BigInt(body.slotB), ...bits4(body.bitsB), fromHex(body.secretB), decodePath(body.pathB),
-      );
-      return { ok: true as const, txId: txIdOf(tx) };
-    }),
-
-  proveRandomFraud: (body: {
-    gameId: string; side: "x" | "o"; turn: number; slot: number;
-    bitsA: number[]; randomA: string; pathA: WirePath;
-    bitsB: number[]; randomB: string; pathB: WirePath;
-  }) =>
-    withLock(async () => {
-      const { found } = await attach();
-      const fn = body.side === "x" ? "proveRandomEquivocationByX" : "proveRandomEquivocationByO";
-      const tx = await found.callTx[fn](
-        gid(body.gameId), BigInt(body.turn), BigInt(body.slot),
-        ...bits4(body.bitsA), fromHex(body.randomA), decodePath(body.pathA),
-        ...bits4(body.bitsB), fromHex(body.randomB), decodePath(body.pathB),
-      );
-      return { ok: true as const, txId: txIdOf(tx) };
-    }),
-
-  proveWrongParity: (body: {
-    gameId: string; turn: number; slot: number;
-    bitsI: number[]; secretI: string; pathI: WirePath;
-    bitsR: number[]; randomR: string; pathR: WirePath;
-  }) =>
-    withLock(async () => {
-      const { found } = await attach();
-      const tx = await found.callTx.proveWrongParity(
-        gid(body.gameId), BigInt(body.turn), BigInt(body.slot),
-        ...bits4(body.bitsI), fromHex(body.secretI), decodePath(body.pathI),
-        ...bits4(body.bitsR), fromHex(body.randomR), decodePath(body.pathR),
-      );
-      return { ok: true as const, txId: txIdOf(tx) };
-    }),
-
-  // ── Roll-class dispute (challenge / answer / forfeit) ─────────────────────
-  // The responder demands a committed turn's roll evidence (callerMark auth).
-  challengeRoll: (gameId: string, secret: string, turn: number, respondBy: string) =>
-    withLock(async () => {
-      const { found } = await attachWithSecret(fromHex(secret));
-      const tx = await found.callTx.challengeRoll(gid(gameId), BigInt(turn), BigInt(respondBy));
-      return { ok: true as const, txId: txIdOf(tx) };
-    }),
-
-  // Permissionless: the reveals authenticate themselves under both roots.
-  answerRollChallenge: (body: {
-    gameId: string; slot: number;
-    bitsI: number[]; secretI: string; pathI: WirePath;
-    bitsR: number[]; randomR: string; pathR: WirePath;
-  }) =>
-    withLock(async () => {
-      const { found } = await attach();
-      const tx = await found.callTx.answerRollChallenge(
-        gid(body.gameId), BigInt(body.slot),
-        ...bits4(body.bitsI), fromHex(body.secretI), decodePath(body.pathI),
-        ...bits4(body.bitsR), fromHex(body.randomR), decodePath(body.pathR),
-      );
-      return { ok: true as const, txId: txIdOf(tx) };
-    }),
-
-  claimRollChallenge: (gameId: string) =>
-    withLock(async () => {
-      const { found } = await attach();
-      const tx = await found.callTx.claimRollChallenge(gid(gameId));
       return { ok: true as const, txId: txIdOf(tx) };
     }),
 };

@@ -140,11 +140,14 @@ export function hashSignedMove(m: SignedMove): Uint8Array {
 
 // ── Stand-alone reveal verification (used mid-ceremony) ────────────────────
 
+// Root parameters are NULLABLE: the simplified (trusting) contract keeps no
+// Merkle roots on-chain, so a null root skips ONLY the root-membership check —
+// every other integrity check (leaf preimage, legality, hash-link) still runs.
 export function verifyIntent(
   it: Intent,
   expectedChannelId: string,
   expectedTurn: number,
-  moverRootIdx: bigint,
+  moverRootIdx: bigint | null,
 ): { ok: true } | { ok: false; reason: string } {
   if (it.channelId !== expectedChannelId) return { ok: false, reason: "intent: channelId mismatch" };
   if (it.turn !== expectedTurn) return { ok: false, reason: `intent: turn ${it.turn} != expected ${expectedTurn}` };
@@ -152,7 +155,7 @@ export function verifyIntent(
   if (it.slot < 0 || it.slot > 15) return { ok: false, reason: "intent: slot out of range" };
   const leaf = computeIndexLeaf(gameIdOf(it.channelId), it.turn, it.slot, it.bits, it.secret);
   if (!eqBytes(leaf, it.path.leaf)) return { ok: false, reason: "intent: leaf preimage mismatch" };
-  if (merklePathRootField(it.path.leaf, it.path.path) !== moverRootIdx) {
+  if (moverRootIdx !== null && merklePathRootField(it.path.leaf, it.path.path) !== moverRootIdx) {
     return { ok: false, reason: "intent: not under the mover's I-root" };
   }
   return { ok: true };
@@ -163,7 +166,7 @@ export function verifyRandomReveal(
   expectedChannelId: string,
   expectedTurn: number,
   expectedSlot: number,
-  responderRootRnd: bigint,
+  responderRootRnd: bigint | null,
 ): { ok: true } | { ok: false; reason: string } {
   if (r.channelId !== expectedChannelId) return { ok: false, reason: "random: channelId mismatch" };
   if (r.turn !== expectedTurn) return { ok: false, reason: `random: turn ${r.turn} != expected ${expectedTurn}` };
@@ -172,7 +175,7 @@ export function verifyRandomReveal(
   if (r.random.length !== 32) return { ok: false, reason: "random: value must be 32 bytes" };
   const leaf = computeRandomLeaf(gameIdOf(r.channelId), r.turn, r.slot, r.bits, r.random);
   if (!eqBytes(leaf, r.path.leaf)) return { ok: false, reason: "random: leaf preimage mismatch" };
-  if (merklePathRootField(r.path.leaf, r.path.path) !== responderRootRnd) {
+  if (responderRootRnd !== null && merklePathRootField(r.path.leaf, r.path.path) !== responderRootRnd) {
     return { ok: false, reason: "random: not under the responder's R-root" };
   }
   return { ok: true };
@@ -181,9 +184,9 @@ export function verifyRandomReveal(
 // ── Full move verification ──────────────────────────────────────────────────
 
 export interface MoveVerifyRoots {
-  moverRootToken: bigint;
-  moverRootIdx: bigint;
-  responderRootRnd: bigint;
+  moverRootToken: bigint | null;
+  moverRootIdx: bigint | null;
+  responderRootRnd: bigint | null;
 }
 
 export function verifySignedMove(
@@ -252,7 +255,7 @@ export function verifySignedMove(
   if (!eqBytes(expectedLeaf, m.token.path.leaf)) {
     return { ok: false, reason: "token leaf preimage mismatch" };
   }
-  if (merklePathRootField(m.token.path.leaf, m.token.path.path) !== roots.moverRootToken) {
+  if (roots.moverRootToken !== null && merklePathRootField(m.token.path.leaf, m.token.path.path) !== roots.moverRootToken) {
     return { ok: false, reason: "token does not sit under the mover's T-root" };
   }
   return { ok: true };

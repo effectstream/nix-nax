@@ -80,10 +80,6 @@ export default function GameView({ session, onLeave }: Props) {
       if (p.statusName !== s.statusName) log(`chain: status ${p.statusName} -> ${s.statusName}`);
       if (p.committedTurns !== s.committedTurns) log(`chain: committedTurns ${p.committedTurns} -> ${s.committedTurns}`);
       if (p.winnerName !== s.winnerName) log(`chain: winner -> ${s.winnerName === "x" || s.winnerName === "o" ? colorOfRole(s.winnerName) : s.winnerName.toUpperCase()}`);
-      if (!p.hasChallenge && s.hasChallenge) log(`chain: challenge window armed (until ${s.challengeUntil})`);
-      if (p.hasChallenge && !s.hasChallenge) log("chain: challenge window cleared");
-      if (!p.hasDeadline && s.hasDeadline) log(`chain: timeout deadline armed (until ${s.deadline})`);
-      if (p.hasDeadline && !s.hasDeadline) log("chain: timeout deadline cleared");
       if ((p.actionLog?.length ?? 0) !== (s.actionLog?.length ?? 0)) {
         log(`chain: actionLog ${p.actionLog?.length ?? 0} -> ${s.actionLog?.length ?? 0} entries`);
       }
@@ -189,13 +185,8 @@ export default function GameView({ session, onLeave }: Props) {
           const idBytes = hexToBytes(oppIsX ? s.idX : s.idO);
           const rootToken = BigInt(oppIsX ? s.rootX : s.rootO);
           if (rootToken !== 0n || !idBytes.every((b) => b === 0)) {
-            session.setOpponent({
-              id: idBytes,
-              rootToken,
-              rootIdx: BigInt(oppIsX ? s.rootIdxX : s.rootIdxO),
-              rootRnd: BigInt(oppIsX ? s.rootRndX : s.rootRndO),
-            });
-            log(`opponent commitments fetched from chain (${oppIsX ? "RED" : "BLUE"})`);
+            session.setOpponent({ id: idBytes, rootToken });
+            log(`opponent commitment fetched from chain (${oppIsX ? "RED" : "BLUE"})`);
             force();
             // Replay relay messages that raced ahead of the commitments (in
             // arrival order) — without this the opponent's first roll intent is

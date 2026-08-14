@@ -155,8 +155,6 @@ export function startAiOpponent(gameId: string): AiHandle {
               gameId,
               idO: hex(session.keys.id),
               rootO: "0x" + session.keys.tokenTree.root.field.toString(16),
-              rootIdxO: "0x" + session.keys.indexTree.root.field.toString(16),
-              rootRndO: "0x" + session.keys.randomTree.root.field.toString(16),
             });
             log("joined on-chain");
             break;
@@ -178,12 +176,7 @@ export function startAiOpponent(gameId: string): AiHandle {
       }
       if (stopped) return;
       if (!session.opponentInfo && (BigInt(st.rootX) !== 0n || !fromHex(st.idX).every((b) => b === 0))) {
-        session.setOpponent({
-          id: fromHex(st.idX),
-          rootToken: BigInt(st.rootX),
-          rootIdx: BigInt(st.rootIdxX),
-          rootRnd: BigInt(st.rootRndX),
-        });
+        session.setOpponent({ id: fromHex(st.idX), rootToken: BigInt(st.rootX) });
         persist();
       }
       if (stopped) return;

@@ -1,0 +1,1111 @@
+// NixNaxArena.compact
+// Multi-game arena for the 4x4 stacked-pieces state-channel game. ONE
+// deployment hosts ANY number of concurrent games: every ledger value is
+// keyed by a client-generated 32-byte gameId, so starting a game is a single
+// fast `createGame` call instead of a contract deploy.
+//
+// GAME RULES (mirrored in src/sdk/game/rules.ts — keep in sync):
+//   * 4x4 board; each cell stacks up to 4 layers. A piece of size s
+//     (0=smallest … 3=largest) sits at layer s; strictly-larger covers
+//     smaller (own or opponent's).
+//   * 12 pieces per player (3 per size). Removal returns the piece to its
+//     owner's reserve and reveals what was beneath.
+//   * Win: 4 visible tops in a row (10 lines: 4 rows + 4 cols + 2 diagonals);
+//     mover precedence; a valid history STOPS at the first win. 128-turn cap = draw.
+//   * Turn 0 places. Later turns are gated by a 4-bit joint ROLL:
+//     each side pre-commits four bits per ceremony leaf; joint bit
+//     jk = bIk XOR bRk; v = j0 + 2*j1 + 4*j2 + 8*j3 (uniform 0..15).
+//     v < 3  -> REMOVE turn (3/16 = 18.75% ~ "about 20%")
+//     v >= 3 -> PLACE turn.
+//     Pass only when a remove turn has no removable target.
+//
+// PER-GAME IDENTITY: idP = persistentHash(["nixnax:id:", gameId, sk]) — a
+// player's identity (and all three Merkle trees, whose leaf preimages embed
+// gameId) is scoped to one game; nothing replays across games.
+//
+// OPTIMISTIC CLASS + proveWrongParity: settle validates rules against a
+// CLAIMED class (1=place, 0=remove/pass) recorded in the per-game actionLog;
+// lying about the class is slashable with the turn's two committed reveals.
+//
+// CHUNKED SETTLE: up to 8 moves per call, strictly extending the committed
+// history. Constant circuit size regardless of game length.
+
+pragma language_version >= 0.16.0;
+
+import CompactStandardLibrary;
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export enum Status { halfOpen, inProgress, settled }
+export enum Winner { none, x, o, draw }
+
+// Marks: 0 = empty, 1 = X (moves on even turns), 2 = O.
+// Kinds: 1 = place, 2 = remove, 3 = pass.
+
+struct TokenPreimage {
+  domainSep: Bytes<32>,
+  gameId: Bytes<32>,
+  turn: Uint<16>,
+  kind: Uint<8>,
+  cell: Uint<8>,
+  size: Uint<8>,
+  secret: Bytes<32>,
+}
+
+struct IndexPreimage {
+  domainSep: Bytes<32>,
+  gameId: Bytes<32>,
+  turn: Uint<16>,
+  slot: Uint<8>,
+  b0: Uint<8>,
+  b1: Uint<8>,
+  b2: Uint<8>,
+  b3: Uint<8>,
+  secret: Bytes<32>,
+}
+
+struct RandomPreimage {
+  domainSep: Bytes<32>,
+  gameId: Bytes<32>,
+  turn: Uint<16>,
+  slot: Uint<8>,
+  b0: Uint<8>,
+  b1: Uint<8>,
+  b2: Uint<8>,
+  b3: Uint<8>,
+  random: Bytes<32>,
+}
+
+// Identities + tree roots — written at createGame / joinGame, then immutable.
+struct GameKeys {
+  idX: Bytes<32>,
+  idO: Bytes<32>,
+  rootX: MerkleTreeDigest,
+  rootO: MerkleTreeDigest,
+  rootIdxX: MerkleTreeDigest,
+  rootIdxO: MerkleTreeDigest,
+  rootRndX: MerkleTreeDigest,
+  rootRndO: MerkleTreeDigest,
+}
+
+// Mutable per-game scalars — read once, written back via `withDyn` helpers.
+struct GameDyn {
+  turnMark: Uint<8>,
+  committedTurns: Uint<8>,
+  status: Status,
+  winner: Winner,
+  deadline: Uint<64>,
+  hasDeadline: Boolean,
+  challengeUntil: Uint<64>,
+  hasChallenge: Boolean,
+  // Roll-class dispute (challengeRoll / answerRollChallenge / claimRollChallenge):
+  // the responder of `challengeTurn` has demanded the roll evidence; the mover
+  // must answer before `respondBy` or forfeit.
+  challengeTurn: Uint<16>,
+  hasRollChallenge: Boolean,
+  respondBy: Uint<64>,
+}
+
+// ---------------------------------------------------------------------------
+// On-chain (public) state — everything keyed by gameId
+// ---------------------------------------------------------------------------
+
+export ledger gameKeys: Map<Bytes<32>, GameKeys>;
+export ledger gameState: Map<Bytes<32>, GameDyn>;
+// boards: cell*4+layer -> mark (sparse; absent == empty).
+export ledger boards: Map<Bytes<32>, Map<Uint<16>, Uint<8>>>;
+// tops: cell -> visible mark (sparse; absent == empty).
+export ledger tops: Map<Bytes<32>, Map<Uint<16>, Uint<8>>>;
+// reserves: mark*4+size -> remaining count (0..3).
+export ledger reserves: Map<Bytes<32>, Map<Uint<16>, Uint<8>>>;
+// actionLogs: turn -> claimedClass*256 + kind*64 + size*16 + cell.
+export ledger actionLogs: Map<Bytes<32>, Map<Uint<16>, Uint<16>>>;
+// rollAnswered: turns whose roll-class challenge was answered on-chain —
+// each turn can be challenged at most once (anti-griefing).
+export ledger rollAnswered: Map<Bytes<32>, Map<Uint<16>, Boolean>>;
+
+// Minimum challenge / timeout / response window (block-time units — seconds on
+// the live chain), fixed at deployment. Every caller-supplied deadline
+// (settle's challengeUntil, startTimeout's deadline, challengeRoll's respondBy)
+// must exceed the current block time by at least this much, so a settler can't
+// pick a zero/instant window and skip the challenge phase. Production should set
+// a generous value (e.g. 600 = 10 min); tests deploy a small one to run fast.
+export sealed ledger minWindowSecs: Uint<64>;
+
+constructor(minWindow: Uint<64>) {
+  minWindowSecs = disclose(minWindow);
+}
+
+// ---------------------------------------------------------------------------
+// Caller authentication (per-game proof of knowledge)
+// ---------------------------------------------------------------------------
+
+witness localSecret(): Bytes<32>;
+
+circuit playerId(gameId: Bytes<32>, secret: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<3, Bytes<32>>>([pad(32, "nixnax:id:"), gameId, secret]);
+}
+
+circuit callerMark(gameId: Bytes<32>): Uint<8> {
+  const k = gameKeys.lookup(gameId);
+  const h = playerId(gameId, localSecret());
+  const isX = h == k.idX;
+  const isO = h == k.idO;
+  assert(isX || isO, "caller must prove knowledge of a registered player secret");
+  return isX ? 1 : 2;
+}
+
+// ---------------------------------------------------------------------------
+// Game lifecycle: createGame / joinGame (replaces per-game deploys)
+// ---------------------------------------------------------------------------
+
+export circuit createGame(
+  gameId: Bytes<32>,
+  cX: Bytes<32>,
+  rTokenX: MerkleTreeDigest,
+  rIdxX: MerkleTreeDigest,
+  rRndX: MerkleTreeDigest
+): [] {
+  const gid = disclose(gameId);
+  assert(!gameKeys.member(gid), "gameId already exists");
+  // Input format: the all-zero identity is the "no player yet" sentinel and a
+  // zero digest is the "no root yet" sentinel (see joinGame) — real
+  // registrations must not collide with either.
+  assert(disclose(cX) != pad(32, ""), "player identity must not be zero");
+  assert(disclose(rTokenX).field != 0, "token root must not be zero");
+  assert(disclose(rIdxX).field != 0, "index root must not be zero");
+  assert(disclose(rRndX).field != 0, "random root must not be zero");
+  gameKeys.insert(gid, GameKeys {
+    idX: disclose(cX),
+    idO: pad(32, ""),
+    rootX: disclose(rTokenX),
+    rootO: MerkleTreeDigest { field: 0 },
+    rootIdxX: disclose(rIdxX),
+    rootIdxO: MerkleTreeDigest { field: 0 },
+    rootRndX: disclose(rRndX),
+    rootRndO: MerkleTreeDigest { field: 0 }
+  });
+  gameState.insert(gid, GameDyn {
+    turnMark: 1,
+    committedTurns: 0,
+    status: Status.halfOpen,
+    winner: Winner.none,
+    deadline: 0,
+    hasDeadline: false,
+    challengeUntil: 0,
+    hasChallenge: false,
+    challengeTurn: 0,
+    hasRollChallenge: false,
+    respondBy: 0
+  });
+  boards.insert(gid, default<Map<Uint<16>, Uint<8>>>);
+  tops.insert(gid, default<Map<Uint<16>, Uint<8>>>);
+  actionLogs.insert(gid, default<Map<Uint<16>, Uint<16>>>);
+  rollAnswered.insert(gid, default<Map<Uint<16>, Boolean>>);
+  reserves.insert(gid, default<Map<Uint<16>, Uint<8>>>);
+  for (const s of 0..4) {
+    reserves.lookup(gid).insert((4 + s) as Uint<16>, 3 as Uint<8>);  // X: 4,5,6,7
+    reserves.lookup(gid).insert((8 + s) as Uint<16>, 3 as Uint<8>);  // O: 8,9,10,11
+  }
+}
+
+export circuit joinGame(
+  gameId: Bytes<32>,
+  cO: Bytes<32>,
+  rTokenO: MerkleTreeDigest,
+  rIdxO: MerkleTreeDigest,
+  rRndO: MerkleTreeDigest
+): [] {
+  const gid = disclose(gameId);
+  assert(gameKeys.member(gid), "no such game");
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.halfOpen, "game already open");
+  const k = gameKeys.lookup(gid);
+  // Input format: non-zero identity/roots (zero = "unset" sentinel), and the
+  // joiner must be a DISTINCT identity — if idO == idX, callerMark would
+  // always resolve the pair to X and turn/timeout authorization breaks.
+  assert(disclose(cO) != pad(32, ""), "player identity must not be zero");
+  assert(disclose(cO) != k.idX, "joiner identity must differ from the creator's");
+  assert(disclose(rTokenO).field != 0, "token root must not be zero");
+  assert(disclose(rIdxO).field != 0, "index root must not be zero");
+  assert(disclose(rRndO).field != 0, "random root must not be zero");
+  gameKeys.insert(gid, GameKeys {
+    idX: k.idX,
+    idO: disclose(cO),
+    rootX: k.rootX,
+    rootO: disclose(rTokenO),
+    rootIdxX: k.rootIdxX,
+    rootIdxO: disclose(rIdxO),
+    rootRndX: k.rootRndX,
+    rootRndO: disclose(rRndO)
+  });
+  gameState.insert(gid, GameDyn {
+    turnMark: d.turnMark,
+    committedTurns: d.committedTurns,
+    status: Status.inProgress,
+    winner: d.winner,
+    deadline: d.deadline,
+    hasDeadline: d.hasDeadline,
+    challengeUntil: d.challengeUntil,
+    hasChallenge: d.hasChallenge,
+    challengeTurn: d.challengeTurn,
+    hasRollChallenge: d.hasRollChallenge,
+    respondBy: d.respondBy
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Leaf schemes (gameId-bound)
+// ---------------------------------------------------------------------------
+
+circuit tokenLeaf(gid: Bytes<32>, turn: Uint<16>, kind: Uint<8>, cell: Uint<8>, size: Uint<8>, secret: Bytes<32>): Bytes<32> {
+  return persistentHash<TokenPreimage>(
+    TokenPreimage { domainSep: pad(32, "nixnax:otk:"), gameId: gid, turn: turn, kind: kind, cell: cell, size: size, secret: secret }
+  );
+}
+
+circuit tokenIsUnder(
+  root: MerkleTreeDigest,
+  gid: Bytes<32>,
+  turn: Uint<16>,
+  kind: Uint<8>,
+  cell: Uint<8>,
+  size: Uint<8>,
+  secret: Bytes<32>,
+  path: MerkleTreePath<14, Bytes<32>>
+): Boolean {
+  const leaf = tokenLeaf(gid, turn, kind, cell, size, secret);
+  return path.leaf == leaf
+      && merkleTreePathRoot<14, Bytes<32>>(path).field == root.field;
+}
+
+circuit indexLeaf(gid: Bytes<32>, turn: Uint<16>, slot: Uint<8>, b0: Uint<8>, b1: Uint<8>, b2: Uint<8>, b3: Uint<8>, secret: Bytes<32>): Bytes<32> {
+  return persistentHash<IndexPreimage>(
+    IndexPreimage { domainSep: pad(32, "nixnax:idx:"), gameId: gid, turn: turn, slot: slot, b0: b0, b1: b1, b2: b2, b3: b3, secret: secret }
+  );
+}
+
+circuit indexIsUnder(
+  root: MerkleTreeDigest,
+  gid: Bytes<32>,
+  turn: Uint<16>,
+  slot: Uint<8>,
+  b0: Uint<8>, b1: Uint<8>, b2: Uint<8>, b3: Uint<8>,
+  secret: Bytes<32>,
+  path: MerkleTreePath<7, Bytes<32>>
+): Boolean {
+  const leaf = indexLeaf(gid, turn, slot, b0, b1, b2, b3, secret);
+  return path.leaf == leaf
+      && merkleTreePathRoot<7, Bytes<32>>(path).field == root.field;
+}
+
+circuit randomLeaf(gid: Bytes<32>, turn: Uint<16>, slot: Uint<8>, b0: Uint<8>, b1: Uint<8>, b2: Uint<8>, b3: Uint<8>, random: Bytes<32>): Bytes<32> {
+  return persistentHash<RandomPreimage>(
+    RandomPreimage { domainSep: pad(32, "nixnax:rnd:"), gameId: gid, turn: turn, slot: slot, b0: b0, b1: b1, b2: b2, b3: b3, random: random }
+  );
+}
+
+circuit randomIsUnder(
+  root: MerkleTreeDigest,
+  gid: Bytes<32>,
+  turn: Uint<16>,
+  slot: Uint<8>,
+  b0: Uint<8>, b1: Uint<8>, b2: Uint<8>, b3: Uint<8>,
+  random: Bytes<32>,
+  path: MerkleTreePath<11, Bytes<32>>
+): Boolean {
+  const leaf = randomLeaf(gid, turn, slot, b0, b1, b2, b3, random);
+  return path.leaf == leaf
+      && merkleTreePathRoot<11, Bytes<32>>(path).field == root.field;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+// 4-bit joint roll: jk = bIk XOR bRk, v = sum of weighted joint bits.
+// All bits must be 0/1 (asserted by callers). v is uniform on 0..15 when
+// either side's bits are; the action class is REMOVE iff v < 3 (18.75%).
+circuit jointRoll(
+  bI0: Uint<8>, bI1: Uint<8>, bI2: Uint<8>, bI3: Uint<8>,
+  bR0: Uint<8>, bR1: Uint<8>, bR2: Uint<8>, bR3: Uint<8>
+): Uint<8> {
+  const j0 = (bI0 + bR0 == 1) ? 1 as Uint<8> : 0 as Uint<8>;
+  const j1 = (bI1 + bR1 == 1) ? 1 as Uint<8> : 0 as Uint<8>;
+  const j2 = (bI2 + bR2 == 1) ? 1 as Uint<8> : 0 as Uint<8>;
+  const j3 = (bI3 + bR3 == 1) ? 1 as Uint<8> : 0 as Uint<8>;
+  return (j0 + 2 * j1 + 4 * j2 + 8 * j3) as Uint<8>;
+}
+
+// Half-and-bit of a turn number, computed OFF-circuit (Compact has no modulo,
+// division, or bitwise operators — only + - *). The standard ZK division
+// witness: the prover supplies (half, bit); the circuit verifies
+//   2*half + bit == t   and   bit <= 1
+// which determines both uniquely (Uint multiplication widens, so the identity
+// holds over the true integers — no wrap). A dishonest witness can only fail
+// its own proof. Correct for the FULL Uint<16> domain — no hidden coupling to
+// the 128-turn cap (which lives in settle's `base + n <= 128` assert).
+witness wit_divMod2(value: Uint<16>): [Uint<16>, Uint<8>];
+
+// Parity of a turn number: X moves on even turns.
+circuit isEvenTurn(t: Uint<16>): Boolean {
+  const [h, b] = wit_divMod2(t);
+  const half = disclose(h);
+  const bit = disclose(b);
+  assert(bit <= 1, "parity witness: bit must be 0 or 1");
+  assert(2 * half + bit == t, "parity witness: 2*half + bit != value");
+  return bit == 0;
+}
+
+// 4-in-a-row on the 4x4 board: 4 full rows + 4 full columns + 2 diagonals.
+circuit lineWin(m: Uint<8>, t: Vector<16, Uint<8>>): Boolean {
+  return (t[0] == m && t[1] == m && t[2] == m && t[3] == m)        // row 0
+      || (t[4] == m && t[5] == m && t[6] == m && t[7] == m)        // row 1
+      || (t[8] == m && t[9] == m && t[10] == m && t[11] == m)      // row 2
+      || (t[12] == m && t[13] == m && t[14] == m && t[15] == m)    // row 3
+      || (t[0] == m && t[4] == m && t[8] == m && t[12] == m)       // col 0
+      || (t[1] == m && t[5] == m && t[9] == m && t[13] == m)       // col 1
+      || (t[2] == m && t[6] == m && t[10] == m && t[14] == m)      // col 2
+      || (t[3] == m && t[7] == m && t[11] == m && t[15] == m)      // col 3
+      || (t[0] == m && t[5] == m && t[10] == m && t[15] == m)      // diag ↘
+      || (t[3] == m && t[6] == m && t[9] == m && t[12] == m);      // diag ↙
+}
+
+circuit anyTopOf(m: Uint<8>, t: Vector<16, Uint<8>>): Boolean {
+  return (t[0] == m) || (t[1] == m) || (t[2] == m) || (t[3] == m)
+      || (t[4] == m) || (t[5] == m) || (t[6] == m) || (t[7] == m)
+      || (t[8] == m) || (t[9] == m) || (t[10] == m) || (t[11] == m)
+      || (t[12] == m) || (t[13] == m) || (t[14] == m) || (t[15] == m);
+}
+
+// Sparse reads — absent key == empty (0).
+circuit boardAt(gid: Bytes<32>, k: Uint<16>): Uint<8> {
+  if (!boards.lookup(gid).member(k)) { return 0; }
+  return boards.lookup(gid).lookup(k);
+}
+
+circuit topAt(gid: Bytes<32>, c: Uint<16>): Uint<8> {
+  if (!tops.lookup(gid).member(c)) { return 0; }
+  return tops.lookup(gid).lookup(c);
+}
+
+circuit readTops(gid: Bytes<32>): Vector<16, Uint<8>> {
+  return [
+    topAt(gid, 0), topAt(gid, 1), topAt(gid, 2), topAt(gid, 3),
+    topAt(gid, 4), topAt(gid, 5), topAt(gid, 6), topAt(gid, 7),
+    topAt(gid, 8), topAt(gid, 9), topAt(gid, 10), topAt(gid, 11),
+    topAt(gid, 12), topAt(gid, 13), topAt(gid, 14), topAt(gid, 15)
+  ];
+}
+
+circuit takeFromReserve(gid: Bytes<32>, m: Uint<8>, s: Uint<8>): [] {
+  const rk = (m * 4 + s) as Uint<16>;
+  const cur = reserves.lookup(gid).lookup(rk);
+  assert(cur > 0, "no piece of that size left in reserve");
+  reserves.lookup(gid).insert(rk, cur == 3 ? 2 as Uint<8> : (cur == 2 ? 1 as Uint<8> : 0 as Uint<8>));
+}
+
+circuit returnToReserve(gid: Bytes<32>, m: Uint<8>, s: Uint<8>): [] {
+  const rk = (m * 4 + s) as Uint<16>;
+  const cur = reserves.lookup(gid).lookup(rk);
+  assert(cur < 3, "reserve overflow");
+  reserves.lookup(gid).insert(rk, cur == 0 ? 1 as Uint<8> : (cur == 1 ? 2 as Uint<8> : 3 as Uint<8>));
+}
+
+// GameDyn "with" helpers (Compact has no struct-update syntax).
+circuit dynWithWinner(d: GameDyn, w: Winner): GameDyn {
+  return GameDyn {
+    turnMark: d.turnMark, committedTurns: d.committedTurns,
+    status: d.status, winner: w,
+    deadline: d.deadline, hasDeadline: d.hasDeadline,
+    challengeUntil: d.challengeUntil, hasChallenge: d.hasChallenge,
+    challengeTurn: d.challengeTurn, hasRollChallenge: d.hasRollChallenge,
+    respondBy: d.respondBy
+  };
+}
+
+// M1: a win proven by fraud proof or claimed by timeout marks the outcome
+// decided but keeps status == inProgress, so the winner can still call
+// claimResult to finalise and mint their reward. Both the timeout and challenge
+// flags are cleared — no window applies to an already-proven result, and the
+// cleared hasChallenge is what tells claimResult to skip the window check.
+circuit dynDecided(d: GameDyn, w: Winner): GameDyn {
+  return GameDyn {
+    turnMark: d.turnMark, committedTurns: d.committedTurns,
+    status: Status.inProgress, winner: w,
+    deadline: 0, hasDeadline: false,
+    challengeUntil: 0, hasChallenge: false,
+    challengeTurn: 0, hasRollChallenge: false, respondBy: 0
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Chunked settle
+// ---------------------------------------------------------------------------
+// One GENERIC implementation sized by #N (moves per chunk), exported as
+// monomorphic variants (generic circuits cannot be entry points). All settle
+// asserts live here ONCE, so every variant is identical by construction. The
+// caller picks the best fit: settle2 for short tails (much smaller circuit →
+// much faster proof), settle11 to cut the tx count of long histories.
+// 11 is the LARGEST size the node accepts: the circuit must stay k=17 —
+// settle12 crosses into k=18 and the node rejects the call at dispatch
+// (1010 Custom(168): verification weight over the per-tx budget; a 16-slot
+// settle was measured failing the same way on node 1.0.0).
+
+// Even test for the compile-time-unrolled loop index (i is a literal after
+// monomorphization, so this folds to a constant — no circuit cost). Covers
+// every variant size up to 32.
+circuit chunkIdxIsEven(i: Uint<8>): Boolean {
+  return (i == 0) || (i == 2) || (i == 4) || (i == 6) ||
+         (i == 8) || (i == 10) || (i == 12) || (i == 14) ||
+         (i == 16) || (i == 18) || (i == 20) || (i == 22) ||
+         (i == 24) || (i == 26) || (i == 28) || (i == 30);
+}
+
+circuit settleImpl<#N>(
+  gameId: Bytes<32>,
+  nMoves: Uint<8>,
+  parities: Vector<N, Uint<8>>,   // claimed CLASS per move: 1=place, 0=remove/pass
+  kinds: Vector<N, Uint<8>>,
+  cells: Vector<N, Uint<8>>,
+  sizes: Vector<N, Uint<8>>,
+  secrets: Vector<N, Bytes<32>>,
+  paths: Vector<N, MerkleTreePath<14, Bytes<32>>>,
+  untilTime: Uint<64>
+): [] {
+  const gid = disclose(gameId);
+  assert(gameKeys.member(gid), "no such game");
+  const d0 = gameState.lookup(gid);
+  assert(d0.status == Status.inProgress, "game is not in progress");
+  assert(d0.winner == Winner.none, "game already decided");
+  const keys = gameKeys.lookup(gid);
+
+  const n = disclose(nMoves);
+  assert(n > 0, "empty chunk");
+  assert(n <= N, "chunk too large");
+  const base = d0.committedTurns;
+  assert(base + n <= 128, "exceeds max turns");
+  // C1: the challenge window must be at least MIN_CHALLENGE_SECS in the future.
+  // Without a lower bound a settler could pass a zero/past untilTime and then
+  // finalise via claimResult in the next block, before the opponent can land a
+  // fraud proof — defeating the whole optimistic model. (Keep MIN in sync with
+  // MIN_CHALLENGE_SECS in src/sdk/game/rules.ts.)
+  const challengeEnd = disclose(untilTime);
+  const minWin = minWindowSecs;
+  assert(challengeEnd >= minWin, "challenge window underflow");
+  assert(blockTimeLt((challengeEnd - minWin) as Uint<64>), "challenge window too short");
+  const baseIsEven = isEvenTurn(base as Uint<16>);
+
+  for (const i of 0..N) {
+    if (i < n) {
+      // A win inside this chunk must be the FINAL move of the history.
+      const dCur = gameState.lookup(gid);
+      assert(dCur.winner == Winner.none, "moves after game end");
+
+      const tAbs = (base + i) as Uint<16>;
+      const iIsEven = chunkIdxIsEven(i as Uint<8>);
+      const isXTurn = iIsEven ? baseIsEven : !baseIsEven;
+      const mark = isXTurn ? 1 as Uint<8> : 2 as Uint<8>;
+      const oppMark = isXTurn ? 2 as Uint<8> : 1 as Uint<8>;
+
+      const kind = disclose(kinds[i]);
+      const cell = disclose(cells[i]);
+      const size = disclose(sizes[i]);
+      const par = disclose(parities[i]);
+
+      assert(par <= 1, "class must be 0 or 1");
+      assert(kind >= 1 && kind <= 3, "unknown action kind");
+      assert(cell < 16, "cell out of range");
+      assert(size < 4, "size out of range");
+      if (tAbs == 0) {
+        assert(kind == 1, "turn 0 must be a placement");
+      }
+      assert((kind == 1 && par == 1) || ((kind == 2 || kind == 3) && par == 0),
+             "action kind inconsistent with claimed class");
+
+      const root = isXTurn ? keys.rootX : keys.rootO;
+      assert(
+        tokenIsUnder(root, gid, tAbs, kind, cell, size, disclose(secrets[i]), disclose(paths[i])),
+        "invalid one-time token for this (turn, action)"
+      );
+
+      if (kind == 1) {
+        // PLACE
+        takeFromReserve(gid, mark, size);
+        assert(size > 0 || boardAt(gid, (cell * 4) as Uint<16>) == 0, "cell occupied at target size");
+        assert(size > 1 || boardAt(gid, (cell * 4 + 1) as Uint<16>) == 0, "a piece of that size or larger is here");
+        assert(size > 2 || boardAt(gid, (cell * 4 + 2) as Uint<16>) == 0, "a piece of that size or larger is here");
+        assert(boardAt(gid, (cell * 4 + 3) as Uint<16>) == 0, "a larger piece occupies this cell");
+        boards.lookup(gid).insert((cell * 4 + size) as Uint<16>, mark);
+        tops.lookup(gid).insert(cell as Uint<16>, mark);
+      }
+      if (kind == 2) {
+        // REMOVE — any visible piece (yours OR the opponent's); returns to its
+        // OWNER's reserve (the mark stored at the removed layer).
+        assert(size == 0, "remove uses canonical size 0");
+        const l3 = boardAt(gid, (cell * 4 + 3) as Uint<16>);
+        const l2 = boardAt(gid, (cell * 4 + 2) as Uint<16>);
+        const l1 = boardAt(gid, (cell * 4 + 1) as Uint<16>);
+        const l0 = boardAt(gid, (cell * 4) as Uint<16>);
+        const visible = l3 != 0 ? l3 : (l2 != 0 ? l2 : (l1 != 0 ? l1 : l0));
+        assert(visible != 0, "cell is empty — nothing to remove");
+        if (l3 != 0) {
+          boards.lookup(gid).insert((cell * 4 + 3) as Uint<16>, 0 as Uint<8>);
+          returnToReserve(gid, l3, 3 as Uint<8>);
+          tops.lookup(gid).insert(cell as Uint<16>, l2 != 0 ? l2 : (l1 != 0 ? l1 : l0));
+        } else {
+          if (l2 != 0) {
+            boards.lookup(gid).insert((cell * 4 + 2) as Uint<16>, 0 as Uint<8>);
+            returnToReserve(gid, l2, 2 as Uint<8>);
+            tops.lookup(gid).insert(cell as Uint<16>, l1 != 0 ? l1 : l0);
+          } else {
+            if (l1 != 0) {
+              boards.lookup(gid).insert((cell * 4 + 1) as Uint<16>, 0 as Uint<8>);
+              returnToReserve(gid, l1, 1 as Uint<8>);
+              tops.lookup(gid).insert(cell as Uint<16>, l0);
+            } else {
+              boards.lookup(gid).insert((cell * 4) as Uint<16>, 0 as Uint<8>);
+              returnToReserve(gid, l0, 0 as Uint<8>);
+              tops.lookup(gid).insert(cell as Uint<16>, 0 as Uint<8>);
+            }
+          }
+        }
+      }
+      if (kind == 3) {
+        // PASS: only on a remove-class turn with nothing removable.
+        assert(cell == 0 && size == 0, "pass uses canonical cell 0, size 0");
+      }
+
+      const tw = readTops(gid);
+      if (kind == 3) {
+        assert(!anyTopOf(1 as Uint<8>, tw) && !anyTopOf(2 as Uint<8>, tw), "pass not allowed: a piece is removable");
+      }
+
+      actionLogs.lookup(gid).insert(tAbs, (par * 256 + kind * 64 + size * 16 + cell) as Uint<16>);
+
+      // Win check — mover precedence.
+      const moverWins = lineWin(mark, tw);
+      const oppWins = lineWin(oppMark, tw);
+      if (moverWins) {
+        const dW = gameState.lookup(gid);
+        gameState.insert(gid, dynWithWinner(dW, isXTurn ? Winner.x : Winner.o));
+      } else {
+        if (oppWins) {
+          const dW = gameState.lookup(gid);
+          gameState.insert(gid, dynWithWinner(dW, isXTurn ? Winner.o : Winner.x));
+        }
+      }
+    }
+  }
+
+  const dEnd = gameState.lookup(gid);
+  const newCommitted = (base + n) as Uint<8>;
+  const drawNow = dEnd.winner == Winner.none && newCommitted == 128;
+  const winnerFinal = drawNow ? Winner.draw : dEnd.winner;
+  const nextMark = isEvenTurn(newCommitted as Uint<16>) ? 1 as Uint<8> : 2 as Uint<8>;
+  gameState.insert(gid, GameDyn {
+    turnMark: winnerFinal == Winner.none ? nextMark : dEnd.turnMark,
+    committedTurns: newCommitted,
+    status: dEnd.status,
+    winner: winnerFinal,
+    deadline: dEnd.deadline,
+    hasDeadline: false,
+    challengeUntil: challengeEnd,
+    hasChallenge: true,
+    challengeTurn: dEnd.challengeTurn,
+    hasRollChallenge: dEnd.hasRollChallenge,
+    respondBy: dEnd.respondBy
+  });
+}
+
+// Monomorphic entry points over settleImpl. `settle` keeps its original name
+// (and 8-move size) so existing callers are unchanged.
+export circuit settle2(
+  gameId: Bytes<32>,
+  nMoves: Uint<8>,
+  parities: Vector<2, Uint<8>>,
+  kinds: Vector<2, Uint<8>>,
+  cells: Vector<2, Uint<8>>,
+  sizes: Vector<2, Uint<8>>,
+  secrets: Vector<2, Bytes<32>>,
+  paths: Vector<2, MerkleTreePath<14, Bytes<32>>>,
+  untilTime: Uint<64>
+): [] {
+  return settleImpl<2>(gameId, nMoves, parities, kinds, cells, sizes, secrets, paths, untilTime);
+}
+
+export circuit settle(
+  gameId: Bytes<32>,
+  nMoves: Uint<8>,
+  parities: Vector<8, Uint<8>>,
+  kinds: Vector<8, Uint<8>>,
+  cells: Vector<8, Uint<8>>,
+  sizes: Vector<8, Uint<8>>,
+  secrets: Vector<8, Bytes<32>>,
+  paths: Vector<8, MerkleTreePath<14, Bytes<32>>>,
+  untilTime: Uint<64>
+): [] {
+  return settleImpl<8>(gameId, nMoves, parities, kinds, cells, sizes, secrets, paths, untilTime);
+}
+
+export circuit settle11(
+  gameId: Bytes<32>,
+  nMoves: Uint<8>,
+  parities: Vector<11, Uint<8>>,
+  kinds: Vector<11, Uint<8>>,
+  cells: Vector<11, Uint<8>>,
+  sizes: Vector<11, Uint<8>>,
+  secrets: Vector<11, Bytes<32>>,
+  paths: Vector<11, MerkleTreePath<14, Bytes<32>>>,
+  untilTime: Uint<64>
+): [] {
+  return settleImpl<11>(gameId, nMoves, parities, kinds, cells, sizes, secrets, paths, untilTime);
+}
+
+// Finalise after the challenge window expires. The WINNER (proving knowledge of
+// their player secret) finalises a decided game and mints themselves 1 "Nix-Nax
+// win" shielded token to `recipient`. A draw may be finalised by either player
+// (no mint). The loser has no reason to call this — and is rejected on a decided
+// game so they can't grief the winner's reward.
+export circuit claimResult(gameId: Bytes<32>, recipient: ZswapCoinPublicKey): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "already finalised");
+  const decided = d.winner == Winner.x || d.winner == Winner.o;
+  assert(decided || d.winner == Winner.draw, "no decided outcome to finalise");
+  // A pending roll-class dispute must be resolved first — answered by the
+  // challenged mover, or claimed as a forfeit after respondBy.
+  assert(!d.hasRollChallenge, "a roll-class challenge is pending");
+  // Optimistic-settle wins carry an open challenge window that must close first;
+  // wins proven by a fraud proof or timeout clear hasChallenge (dynDecided) and
+  // finalise immediately, so their winner can still mint the reward (M1).
+  if (d.hasChallenge) {
+    assert(blockTimeGte(d.challengeUntil), "challenge window still open");
+  }
+
+  // Input format: minting to the zero key would irrecoverably burn the reward.
+  assert(disclose(recipient) != default<ZswapCoinPublicKey>, "recipient must not be the zero key");
+
+  const me = callerMark(gid);    // asserts the caller is a registered player (x or o)
+  if (decided) {
+    assert(me == (d.winner == Winner.x ? 1 as Uint<8> : 2 as Uint<8>),
+      "only the winner can finalise a decided game");
+  }
+
+  gameState.insert(gid, GameDyn {
+    turnMark: d.turnMark, committedTurns: d.committedTurns,
+    status: Status.settled, winner: d.winner,
+    deadline: d.deadline, hasDeadline: d.hasDeadline,
+    challengeUntil: 0, hasChallenge: false,
+    challengeTurn: 0, hasRollChallenge: false, respondBy: 0
+  });
+
+  if (decided) {
+    // One stable token color for all wins (balance of it = your win count);
+    // nonce is unique per game so each game mints exactly once.
+    const nonce = persistentHash<Vector<2, Bytes<32>>>([pad(32, "nixnax:win:nonce:"), gid]);
+    mintShieldedToken(pad(32, "nixnax:win"), 1, nonce,
+      left<ZswapCoinPublicKey, ContractAddress>(disclose(recipient)));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Liveness: timeout / forfeit
+// ---------------------------------------------------------------------------
+
+export circuit startTimeout(gameId: Bytes<32>, untilTime: Uint<64>): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "game is not in progress");
+  // H2: a decided game must not be reopened via the timeout path — otherwise the
+  // loser could arm+claim a timeout during the challenge window and overwrite
+  // the real winner.
+  assert(d.winner == Winner.none, "game already decided");
+  const mark = callerMark(gid);
+  assert(mark != d.turnMark, "only the waiting player can start the timeout");
+  // H1: enforce a minimum grace so the waiting player can't arm a near-instant
+  // deadline the mover has no chance to answer. (Keep MIN in sync with
+  // MIN_TIMEOUT_SECS in src/sdk/game/rules.ts.)
+  const deadlineAt = disclose(untilTime);
+  const minWin = minWindowSecs;
+  assert(deadlineAt >= minWin, "timeout underflow");
+  assert(blockTimeLt((deadlineAt - minWin) as Uint<64>), "timeout too short");
+  gameState.insert(gid, GameDyn {
+    turnMark: d.turnMark, committedTurns: d.committedTurns,
+    status: d.status, winner: d.winner,
+    deadline: deadlineAt, hasDeadline: true,
+    challengeUntil: d.challengeUntil, hasChallenge: d.hasChallenge,
+    challengeTurn: d.challengeTurn, hasRollChallenge: d.hasRollChallenge,
+    respondBy: d.respondBy
+  });
+}
+
+export circuit claimTimeout(gameId: Bytes<32>): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "game is not in progress");
+  // H2 (defense in depth): never let a timeout claim overwrite a decided game.
+  // startTimeout already blocks arming one, and settle clears hasDeadline.
+  assert(d.winner == Winner.none, "game already decided");
+  assert(d.hasDeadline, "no timeout has been armed");
+  assert(blockTimeGte(d.deadline), "deadline has not been reached yet");
+  gameState.insert(gid, dynDecided(d, d.turnMark == 1 ? Winner.o : Winner.x));
+}
+
+// ---------------------------------------------------------------------------
+// Roll-class dispute: challenge / answer / forfeit
+//
+// Closes the data-availability gap in the optimistic class (M2): the reveals
+// proveWrongParity needs are exchanged only off-chain, so a mover who settles
+// turns UNILATERALLY (skipping the ceremony) could fabricate a class the
+// opponent has no evidence to slash. The dispute shifts the burden: the
+// responder of a committed turn demands the roll evidence on-chain; the mover
+// must answer with BOTH reveals (their own I-leaf and the responder's R-leaf).
+// A mover who skipped the ceremony never received the responder's R-leaf and
+// cannot forge it (it verifies under the responder's committed R-root), so
+// being able to answer IS proof the ceremony happened — and the answer also
+// re-derives the roll and checks it matches the claimed class. No answer by
+// respondBy => forfeit. Settle stays optimistic and cheap; the cost is one
+// constant-size dispute round, only when actually contested.
+//
+// Anti-abuse: each turn is answerable once (rollAnswered) so a griefer can't
+// re-challenge the same turn; one challenge pending at a time; respondBy has
+// the same minimum grace as the other windows; a pending challenge blocks
+// claimResult. Answering with a DIFFERENT leaf than the ceremony one is
+// self-defeating: it publishes a second valid leaf for that turn, which the
+// opponent slashes via the equivocation proofs.
+// ---------------------------------------------------------------------------
+
+export circuit challengeRoll(gameId: Bytes<32>, turn: Uint<16>, respondBy: Uint<64>): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "already settled");
+  assert(d.winner == Winner.none || d.hasChallenge, "outcome no longer contestable");
+  assert(!d.hasRollChallenge, "a roll challenge is already pending");
+  const t = disclose(turn);
+  assert(t > 0, "turn 0 has no randomness ceremony");
+  assert(t < 128, "turn out of range");
+  assert(actionLogs.lookup(gid).member(t), "turn not committed on-chain");
+  assert(!rollAnswered.lookup(gid).member(t), "turn already answered");
+  // Only the RESPONDER of that turn may demand its evidence — they are the one
+  // party who can be missing it (the mover, by construction, produced it).
+  const me = callerMark(gid);
+  const moverMark = isEvenTurn(t) ? 1 as Uint<8> : 2 as Uint<8>;
+  assert(me != moverMark, "only the responder of that turn can challenge");
+  // Same minimum grace as settle/startTimeout so the mover can actually answer.
+  // (Keep in sync with MIN_RESPONSE_SECS in src/sdk/game/rules.ts.)
+  const by = disclose(respondBy);
+  const minWin = minWindowSecs;
+  assert(by >= minWin, "response window underflow");
+  assert(blockTimeLt((by - minWin) as Uint<64>), "response window too short");
+  gameState.insert(gid, GameDyn {
+    turnMark: d.turnMark, committedTurns: d.committedTurns,
+    status: d.status, winner: d.winner,
+    deadline: d.deadline, hasDeadline: d.hasDeadline,
+    challengeUntil: d.challengeUntil, hasChallenge: d.hasChallenge,
+    challengeTurn: t, hasRollChallenge: true, respondBy: by
+  });
+}
+
+// Permissionless: the reveals are self-authenticating (they verify under both
+// players' committed roots), so no caller identity is needed.
+export circuit answerRollChallenge(
+  gameId: Bytes<32>,
+  slot: Uint<8>,
+  bI0: Uint<8>, bI1: Uint<8>, bI2: Uint<8>, bI3: Uint<8>,
+  secretI: Bytes<32>, pathI: MerkleTreePath<7, Bytes<32>>,
+  bR0: Uint<8>, bR1: Uint<8>, bR2: Uint<8>, bR3: Uint<8>,
+  randomR: Bytes<32>, pathR: MerkleTreePath<11, Bytes<32>>
+): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "already settled");
+  assert(d.hasRollChallenge, "no roll challenge is pending");
+  assert(disclose(slot) < 16, "slot out of range");
+  const t = d.challengeTurn;
+  const moverIsX = isEvenTurn(t);
+  const keys = gameKeys.lookup(gid);
+
+  const i0 = disclose(bI0); const i1 = disclose(bI1); const i2 = disclose(bI2); const i3 = disclose(bI3);
+  const r0 = disclose(bR0); const r1 = disclose(bR1); const r2 = disclose(bR2); const r3 = disclose(bR3);
+  assert(i0 <= 1 && i1 <= 1 && i2 <= 1 && i3 <= 1, "I-bits must be 0 or 1");
+  assert(r0 <= 1 && r1 <= 1 && r2 <= 1 && r3 <= 1, "R-bits must be 0 or 1");
+
+  const iRoot = moverIsX ? keys.rootIdxX : keys.rootIdxO;
+  const rRoot = moverIsX ? keys.rootRndO : keys.rootRndX;
+  assert(indexIsUnder(iRoot, gid, t, disclose(slot), i0, i1, i2, i3, disclose(secretI), disclose(pathI)),
+         "index reveal is not under the mover's I-root");
+  assert(randomIsUnder(rRoot, gid, t, disclose(slot), r0, r1, r2, r3, disclose(randomR), disclose(pathR)),
+         "random reveal is not under the responder's R-root");
+
+  const v = jointRoll(i0, i1, i2, i3, r0, r1, r2, r3);
+  const realPlaceClass = v >= 3;
+  const packed = actionLogs.lookup(gid).lookup(t);
+  const claimedPlaceClass = packed >= 256;
+  assert(claimedPlaceClass == realPlaceClass, "reveals contradict the claimed class");
+
+  rollAnswered.lookup(gid).insert(t, true);
+  gameState.insert(gid, GameDyn {
+    turnMark: d.turnMark, committedTurns: d.committedTurns,
+    status: d.status, winner: d.winner,
+    deadline: d.deadline, hasDeadline: d.hasDeadline,
+    challengeUntil: d.challengeUntil, hasChallenge: d.hasChallenge,
+    challengeTurn: 0, hasRollChallenge: false, respondBy: 0
+  });
+}
+
+// Unanswered past respondBy: the challenged turn's mover forfeits. The winner
+// then finalises (and mints) via claimResult, like every other decided path.
+export circuit claimRollChallenge(gameId: Bytes<32>): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "already settled");
+  assert(d.hasRollChallenge, "no roll challenge is pending");
+  assert(blockTimeGte(d.respondBy), "response window still open");
+  const moverIsX = isEvenTurn(d.challengeTurn);
+  gameState.insert(gid, dynDecided(d, moverIsX ? Winner.o : Winner.x));
+}
+
+// ---------------------------------------------------------------------------
+// Fraud proof: claimed class contradicts the committed bits
+// ---------------------------------------------------------------------------
+
+export circuit proveWrongParity(
+  gameId: Bytes<32>,
+  turn: Uint<16>,
+  slot: Uint<8>,
+  bI0: Uint<8>, bI1: Uint<8>, bI2: Uint<8>, bI3: Uint<8>,
+  secretI: Bytes<32>, pathI: MerkleTreePath<7, Bytes<32>>,
+  bR0: Uint<8>, bR1: Uint<8>, bR2: Uint<8>, bR3: Uint<8>,
+  randomR: Bytes<32>, pathR: MerkleTreePath<11, Bytes<32>>
+): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "already settled");
+  // Fraud proofs are valid only while the outcome is still contestable: either
+  // no winner yet, or an optimistic settle whose challenge window is open
+  // (hasChallenge). Once a proof decides the game (dynDecided clears
+  // hasChallenge) it can't be flipped again by a later proof.
+  assert(d.winner == Winner.none || d.hasChallenge, "outcome no longer contestable");
+  const t = disclose(turn);
+  assert(t > 0, "turn 0 has no randomness ceremony");
+  assert(t < 128, "turn out of range");
+  assert(disclose(slot) < 16, "slot out of range");
+  assert(actionLogs.lookup(gid).member(t), "turn not committed on-chain");
+  const moverIsX = isEvenTurn(t);
+  const keys = gameKeys.lookup(gid);
+
+  const i0 = disclose(bI0); const i1 = disclose(bI1); const i2 = disclose(bI2); const i3 = disclose(bI3);
+  const r0 = disclose(bR0); const r1 = disclose(bR1); const r2 = disclose(bR2); const r3 = disclose(bR3);
+  assert(i0 <= 1 && i1 <= 1 && i2 <= 1 && i3 <= 1, "I-bits must be 0 or 1");
+  assert(r0 <= 1 && r1 <= 1 && r2 <= 1 && r3 <= 1, "R-bits must be 0 or 1");
+
+  const iRoot = moverIsX ? keys.rootIdxX : keys.rootIdxO;
+  const rRoot = moverIsX ? keys.rootRndO : keys.rootRndX;
+  assert(indexIsUnder(iRoot, gid, t, disclose(slot), i0, i1, i2, i3, disclose(secretI), disclose(pathI)),
+         "index reveal is not under the mover's I-root");
+  assert(randomIsUnder(rRoot, gid, t, disclose(slot), r0, r1, r2, r3, disclose(randomR), disclose(pathR)),
+         "random reveal is not under the responder's R-root");
+
+  const v = jointRoll(i0, i1, i2, i3, r0, r1, r2, r3);
+  const realPlaceClass = v >= 3;                 // v < 3 -> remove class
+  const packed = actionLogs.lookup(gid).lookup(t);
+  const claimedPlaceClass = packed >= 256;
+  assert(claimedPlaceClass != realPlaceClass, "claimed class matches the committed bits");
+
+  gameState.insert(gid, dynDecided(d,moverIsX ? Winner.o : Winner.x));
+}
+
+// ---------------------------------------------------------------------------
+// Fraud proofs: equivocation
+// ---------------------------------------------------------------------------
+
+export circuit proveEquivocationByX(
+  gameId: Bytes<32>,
+  turn: Uint<16>,
+  kindA: Uint<8>, cellA: Uint<8>, sizeA: Uint<8>, secretA: Bytes<32>, pathA: MerkleTreePath<14, Bytes<32>>,
+  kindB: Uint<8>, cellB: Uint<8>, sizeB: Uint<8>, secretB: Bytes<32>, pathB: MerkleTreePath<14, Bytes<32>>
+): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "already settled");
+  // Fraud proofs are valid only while the outcome is still contestable: either
+  // no winner yet, or an optimistic settle whose challenge window is open
+  // (hasChallenge). Once a proof decides the game (dynDecided clears
+  // hasChallenge) it can't be flipped again by a later proof.
+  assert(d.winner == Winner.none || d.hasChallenge, "outcome no longer contestable");
+  const keys = gameKeys.lookup(gid);
+  assert(disclose(turn) < 128, "turn out of range");
+  assert(disclose(kindA) >= 1 && disclose(kindA) <= 3 && disclose(kindB) >= 1 && disclose(kindB) <= 3,
+         "unknown action kind");
+  assert(disclose(cellA) < 16 && disclose(cellB) < 16, "cell out of range");
+  assert(disclose(sizeA) < 4 && disclose(sizeB) < 4, "size out of range");
+  assert(disclose(kindA) != disclose(kindB) || disclose(cellA) != disclose(cellB) || disclose(sizeA) != disclose(sizeB),
+         "not a fork: same action");
+  assert(tokenIsUnder(keys.rootX, gid, disclose(turn), disclose(kindA), disclose(cellA), disclose(sizeA), disclose(secretA), disclose(pathA)),
+         "token A is not a valid X token");
+  assert(tokenIsUnder(keys.rootX, gid, disclose(turn), disclose(kindB), disclose(cellB), disclose(sizeB), disclose(secretB), disclose(pathB)),
+         "token B is not a valid X token");
+  gameState.insert(gid, dynDecided(d,Winner.o));
+}
+
+export circuit proveEquivocationByO(
+  gameId: Bytes<32>,
+  turn: Uint<16>,
+  kindA: Uint<8>, cellA: Uint<8>, sizeA: Uint<8>, secretA: Bytes<32>, pathA: MerkleTreePath<14, Bytes<32>>,
+  kindB: Uint<8>, cellB: Uint<8>, sizeB: Uint<8>, secretB: Bytes<32>, pathB: MerkleTreePath<14, Bytes<32>>
+): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "already settled");
+  // Fraud proofs are valid only while the outcome is still contestable: either
+  // no winner yet, or an optimistic settle whose challenge window is open
+  // (hasChallenge). Once a proof decides the game (dynDecided clears
+  // hasChallenge) it can't be flipped again by a later proof.
+  assert(d.winner == Winner.none || d.hasChallenge, "outcome no longer contestable");
+  const keys = gameKeys.lookup(gid);
+  assert(disclose(turn) < 128, "turn out of range");
+  assert(disclose(kindA) >= 1 && disclose(kindA) <= 3 && disclose(kindB) >= 1 && disclose(kindB) <= 3,
+         "unknown action kind");
+  assert(disclose(cellA) < 16 && disclose(cellB) < 16, "cell out of range");
+  assert(disclose(sizeA) < 4 && disclose(sizeB) < 4, "size out of range");
+  assert(disclose(kindA) != disclose(kindB) || disclose(cellA) != disclose(cellB) || disclose(sizeA) != disclose(sizeB),
+         "not a fork: same action");
+  assert(tokenIsUnder(keys.rootO, gid, disclose(turn), disclose(kindA), disclose(cellA), disclose(sizeA), disclose(secretA), disclose(pathA)),
+         "token A is not a valid O token");
+  assert(tokenIsUnder(keys.rootO, gid, disclose(turn), disclose(kindB), disclose(cellB), disclose(sizeB), disclose(secretB), disclose(pathB)),
+         "token B is not a valid O token");
+  gameState.insert(gid, dynDecided(d,Winner.x));
+}
+
+export circuit proveIndexEquivocationByX(
+  gameId: Bytes<32>,
+  turn: Uint<16>,
+  slotA: Uint<8>, a0: Uint<8>, a1: Uint<8>, a2: Uint<8>, a3: Uint<8>, secretA: Bytes<32>, pathA: MerkleTreePath<7, Bytes<32>>,
+  slotB: Uint<8>, b0: Uint<8>, b1: Uint<8>, b2: Uint<8>, b3: Uint<8>, secretB: Bytes<32>, pathB: MerkleTreePath<7, Bytes<32>>
+): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "already settled");
+  // Fraud proofs are valid only while the outcome is still contestable: either
+  // no winner yet, or an optimistic settle whose challenge window is open
+  // (hasChallenge). Once a proof decides the game (dynDecided clears
+  // hasChallenge) it can't be flipped again by a later proof.
+  assert(d.winner == Winner.none || d.hasChallenge, "outcome no longer contestable");
+  const keys = gameKeys.lookup(gid);
+  assert(disclose(turn) < 128, "turn out of range");
+  assert(disclose(slotA) < 16 && disclose(slotB) < 16, "slot out of range");
+  assert(disclose(a0) <= 1 && disclose(a1) <= 1 && disclose(a2) <= 1 && disclose(a3) <= 1,
+         "A-bits must be 0 or 1");
+  assert(disclose(b0) <= 1 && disclose(b1) <= 1 && disclose(b2) <= 1 && disclose(b3) <= 1,
+         "B-bits must be 0 or 1");
+  assert(disclose(slotA) != disclose(slotB)
+      || disclose(a0) != disclose(b0) || disclose(a1) != disclose(b1)
+      || disclose(a2) != disclose(b2) || disclose(a3) != disclose(b3),
+         "not a fork: same index leaf");
+  assert(indexIsUnder(keys.rootIdxX, gid, disclose(turn), disclose(slotA), disclose(a0), disclose(a1), disclose(a2), disclose(a3), disclose(secretA), disclose(pathA)),
+         "index A is not a valid X index leaf");
+  assert(indexIsUnder(keys.rootIdxX, gid, disclose(turn), disclose(slotB), disclose(b0), disclose(b1), disclose(b2), disclose(b3), disclose(secretB), disclose(pathB)),
+         "index B is not a valid X index leaf");
+  gameState.insert(gid, dynDecided(d,Winner.o));
+}
+
+export circuit proveIndexEquivocationByO(
+  gameId: Bytes<32>,
+  turn: Uint<16>,
+  slotA: Uint<8>, a0: Uint<8>, a1: Uint<8>, a2: Uint<8>, a3: Uint<8>, secretA: Bytes<32>, pathA: MerkleTreePath<7, Bytes<32>>,
+  slotB: Uint<8>, b0: Uint<8>, b1: Uint<8>, b2: Uint<8>, b3: Uint<8>, secretB: Bytes<32>, pathB: MerkleTreePath<7, Bytes<32>>
+): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "already settled");
+  // Fraud proofs are valid only while the outcome is still contestable: either
+  // no winner yet, or an optimistic settle whose challenge window is open
+  // (hasChallenge). Once a proof decides the game (dynDecided clears
+  // hasChallenge) it can't be flipped again by a later proof.
+  assert(d.winner == Winner.none || d.hasChallenge, "outcome no longer contestable");
+  const keys = gameKeys.lookup(gid);
+  assert(disclose(turn) < 128, "turn out of range");
+  assert(disclose(slotA) < 16 && disclose(slotB) < 16, "slot out of range");
+  assert(disclose(a0) <= 1 && disclose(a1) <= 1 && disclose(a2) <= 1 && disclose(a3) <= 1,
+         "A-bits must be 0 or 1");
+  assert(disclose(b0) <= 1 && disclose(b1) <= 1 && disclose(b2) <= 1 && disclose(b3) <= 1,
+         "B-bits must be 0 or 1");
+  assert(disclose(slotA) != disclose(slotB)
+      || disclose(a0) != disclose(b0) || disclose(a1) != disclose(b1)
+      || disclose(a2) != disclose(b2) || disclose(a3) != disclose(b3),
+         "not a fork: same index leaf");
+  assert(indexIsUnder(keys.rootIdxO, gid, disclose(turn), disclose(slotA), disclose(a0), disclose(a1), disclose(a2), disclose(a3), disclose(secretA), disclose(pathA)),
+         "index A is not a valid O index leaf");
+  assert(indexIsUnder(keys.rootIdxO, gid, disclose(turn), disclose(slotB), disclose(b0), disclose(b1), disclose(b2), disclose(b3), disclose(secretB), disclose(pathB)),
+         "index B is not a valid O index leaf");
+  gameState.insert(gid, dynDecided(d,Winner.x));
+}
+
+export circuit proveRandomEquivocationByX(
+  gameId: Bytes<32>,
+  turn: Uint<16>,
+  slot: Uint<8>,
+  a0: Uint<8>, a1: Uint<8>, a2: Uint<8>, a3: Uint<8>, randomA: Bytes<32>, pathA: MerkleTreePath<11, Bytes<32>>,
+  b0: Uint<8>, b1: Uint<8>, b2: Uint<8>, b3: Uint<8>, randomB: Bytes<32>, pathB: MerkleTreePath<11, Bytes<32>>
+): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "already settled");
+  // Fraud proofs are valid only while the outcome is still contestable: either
+  // no winner yet, or an optimistic settle whose challenge window is open
+  // (hasChallenge). Once a proof decides the game (dynDecided clears
+  // hasChallenge) it can't be flipped again by a later proof.
+  assert(d.winner == Winner.none || d.hasChallenge, "outcome no longer contestable");
+  const keys = gameKeys.lookup(gid);
+  assert(disclose(turn) < 128, "turn out of range");
+  assert(disclose(slot) < 16, "slot out of range");
+  assert(disclose(a0) <= 1 && disclose(a1) <= 1 && disclose(a2) <= 1 && disclose(a3) <= 1,
+         "A-bits must be 0 or 1");
+  assert(disclose(b0) <= 1 && disclose(b1) <= 1 && disclose(b2) <= 1 && disclose(b3) <= 1,
+         "B-bits must be 0 or 1");
+  assert(disclose(a0) != disclose(b0) || disclose(a1) != disclose(b1)
+      || disclose(a2) != disclose(b2) || disclose(a3) != disclose(b3)
+      || disclose(randomA) != disclose(randomB),
+         "not a fork: same random leaf");
+  assert(randomIsUnder(keys.rootRndX, gid, disclose(turn), disclose(slot), disclose(a0), disclose(a1), disclose(a2), disclose(a3), disclose(randomA), disclose(pathA)),
+         "random A is not a valid X random leaf");
+  assert(randomIsUnder(keys.rootRndX, gid, disclose(turn), disclose(slot), disclose(b0), disclose(b1), disclose(b2), disclose(b3), disclose(randomB), disclose(pathB)),
+         "random B is not a valid X random leaf");
+  gameState.insert(gid, dynDecided(d,Winner.o));
+}
+
+export circuit proveRandomEquivocationByO(
+  gameId: Bytes<32>,
+  turn: Uint<16>,
+  slot: Uint<8>,
+  a0: Uint<8>, a1: Uint<8>, a2: Uint<8>, a3: Uint<8>, randomA: Bytes<32>, pathA: MerkleTreePath<11, Bytes<32>>,
+  b0: Uint<8>, b1: Uint<8>, b2: Uint<8>, b3: Uint<8>, randomB: Bytes<32>, pathB: MerkleTreePath<11, Bytes<32>>
+): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "already settled");
+  // Fraud proofs are valid only while the outcome is still contestable: either
+  // no winner yet, or an optimistic settle whose challenge window is open
+  // (hasChallenge). Once a proof decides the game (dynDecided clears
+  // hasChallenge) it can't be flipped again by a later proof.
+  assert(d.winner == Winner.none || d.hasChallenge, "outcome no longer contestable");
+  const keys = gameKeys.lookup(gid);
+  assert(disclose(turn) < 128, "turn out of range");
+  assert(disclose(slot) < 16, "slot out of range");
+  assert(disclose(a0) <= 1 && disclose(a1) <= 1 && disclose(a2) <= 1 && disclose(a3) <= 1,
+         "A-bits must be 0 or 1");
+  assert(disclose(b0) <= 1 && disclose(b1) <= 1 && disclose(b2) <= 1 && disclose(b3) <= 1,
+         "B-bits must be 0 or 1");
+  assert(disclose(a0) != disclose(b0) || disclose(a1) != disclose(b1)
+      || disclose(a2) != disclose(b2) || disclose(a3) != disclose(b3)
+      || disclose(randomA) != disclose(randomB),
+         "not a fork: same random leaf");
+  assert(randomIsUnder(keys.rootRndO, gid, disclose(turn), disclose(slot), disclose(a0), disclose(a1), disclose(a2), disclose(a3), disclose(randomA), disclose(pathA)),
+         "random A is not a valid O random leaf");
+  assert(randomIsUnder(keys.rootRndO, gid, disclose(turn), disclose(slot), disclose(b0), disclose(b1), disclose(b2), disclose(b3), disclose(randomB), disclose(pathB)),
+         "random B is not a valid O random leaf");
+  gameState.insert(gid, dynDecided(d,Winner.x));
+}

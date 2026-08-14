@@ -1,8 +1,16 @@
 # Nix-Nax
 
-A trustless, two-player **4×4 stacked-pieces game** on the [Midnight](https://midnight.network) blockchain, settled with **zero-knowledge proofs**. Moves are played **off-chain at memory speed** and only the result is committed on-chain — cheating is cryptographically provable, and the winner mints a shielded reward token.
+A two-player **4×4 stacked-pieces game** on the [Midnight](https://midnight.network) blockchain, settled with **zero-knowledge proofs**. Moves are played **off-chain at memory speed** and only the result is committed on-chain — and the winner mints a shielded reward token.
 
-It's a state channel: two players run the whole game peer-to-peer, then post a short, proof-backed summary to the chain. Nobody has to trust a server or each other — the contract and the proofs enforce the rules.
+> **Two versions.** This branch carries the **SIMPLIFIED (teaching) contract**: it trusts the players not to cheat, so most of the anti-cheat machinery (fraud proofs, the roll dispute, timeouts, challenge windows, two of the three Merkle trees) is gone and the whole contract is **4 circuits** you can read in one sitting — while the game itself is unchanged. The full **trustless state-channel version** is preserved at the git tag **`advanced`** and as a side-by-side reference copy in [`src/contract/NixNaxArena.advanced.compact`](src/contract/NixNaxArena.advanced.compact). Read the simplified contract first, then the advanced one to see what removing trust costs.
+
+What the simplified contract teaches, one concept at a time ([`src/contract/NixNaxArena.compact`](src/contract/NixNaxArena.compact)):
+
+- **Ledger state**: `Map`s keyed by a client-generated `gameId` — one deployment hosts any number of games.
+- **Circuits + asserts**: `settle` replays the agreed moves and enforces every board rule in-circuit, so the chain can never hold an illegal position.
+- **Merkle commitments**: each player commits ONE root (the token tree) at create/join; every settled move must reveal its salted one-time token + path, verified in-circuit with `merkleTreePathRoot` under the mover's root.
+- **Witnesses + private identity**: `playerId = persistentHash("nixnax:id:", gameId, localSecret)` — the caller proves knowledge of their secret without revealing it; no spoofable public key.
+- **Shielded tokens**: `claimResult` mints exactly one `nixnax:win` token to the winner; your balance of that color = your win count.
 
 ---
 
@@ -15,7 +23,7 @@ Every turn opens with a **joint dice roll** (0–15) that decides the move type:
 - roll **< 3** (~19%) → **remove** a piece (yours *or* your opponent's) from the board,
 - otherwise (~81%) → **place** a piece.
 
-Neither player controls the roll — it is the XOR of secret bits both sides committed before the game began (see [Randomness](#randomness-the-joint-roll)). The rules live in [`src/sdk/game/rules.ts`](src/sdk/game/rules.ts) and are mirrored exactly in-circuit.
+Neither player controls the roll — it is the XOR of secret bits both sides committed before the game began (see [Randomness](#randomness-the-joint-roll)). The rules live in [`src/sdk/game/rules.ts`](src/sdk/game/rules.ts) and are mirrored exactly in-circuit. (In the simplified contract the roll happens purely off-chain — the chain trusts the agreed place/remove choice.)
 
 ---
 
@@ -66,78 +74,53 @@ For a two-human game, both browsers point at the same relay + the same `arena.js
 
 ## How it works
 
-### A state channel, not a per-turn ledger
+### Off-chain play, on-chain settlement
 
 Posting every move to a blockchain is slow and expensive: each move would be its own transaction, each needing a ZK proof and a block to land in. Nix-Nax avoids that almost entirely.
 
 ```mermaid
 flowchart LR
-  A["Lobby<br/>New game / Join / vs AI"] --> B["createGame / joinGame<br/>(on-chain: commit identities + Merkle roots)"]
+  A["Lobby<br/>New game / Join / vs AI"] --> B["createGame / joinGame<br/>(on-chain: commit identity + token root)"]
   B --> C["Off-chain ceremony via relay<br/>intent → random → signed move"]
   C -- "repeat each turn (instant, free)" --> C
-  C --> D["settle (on-chain)<br/>up to 8 moves/tx + Merkle proofs"]
-  D --> E["Challenge window<br/>fraud proofs can slash a cheater"]
-  E --> F["claimResult (on-chain)<br/>finalize + mint win-token to winner"]
+  C --> D["settle (on-chain)<br/>up to 8 moves/tx + token proofs,<br/>board rules re-checked"]
+  D --> E["claimResult (on-chain)<br/>finalize + mint win-token to winner"]
 ```
 
-Only a handful of call types ever touch the chain — `createGame` / `joinGame` to open a game, `settle`, `claimResult`, the `startTimeout` / `claimTimeout` forfeit path, and the fraud proofs. Everything else happens peer-to-peer over the relay ([`relay/server.ts`](relay/server.ts), [`src/sdk/crypto/signed-move.ts`](src/sdk/crypto/signed-move.ts)): the mover sends an **intent**, the opponent replies with a **random reveal**, and the mover broadcasts a **signed move** that hash-chains to the previous one. Each side verifies locally before accepting.
+Exactly **four circuits** touch the chain — `createGame` / `joinGame` to open a game, `settle`, and `claimResult`. Everything else happens peer-to-peer over the relay ([`relay/server.ts`](relay/server.ts), [`src/sdk/crypto/signed-move.ts`](src/sdk/crypto/signed-move.ts)): the mover sends an **intent**, the opponent replies with a **random reveal**, and the mover broadcasts a **signed move** that hash-chains to the previous one. Each side verifies the game rules locally before accepting.
 
-### The three Merkle trees
+### The token tree — one Merkle commitment per player
 
-When a game opens, each player commits **three Merkle roots** on-chain (six roots total). They never reveal the trees — only a leaf + its path, when needed, and the contract checks it against the root. Every leaf binds the **`gameId`**, so nothing can be replayed into another game. A player's per-game identity is `playerId = persistentHash("nixnax:id:", gameId, localSecret)` ([`src/contract/witnesses.ts`](src/contract/witnesses.ts)), proven via the `localSecret` witness — no spoofable `ownPublicKey()`.
+When a game opens, each player commits **one Merkle root** on-chain: the root of their **token tree** — one salted leaf per legal action `(turn, kind, cell, size)`, 81 per turn, depth 14 / 16,384 leaves ([`token-tree.ts`](src/sdk/crypto/token-tree.ts)). The tree is never revealed — to settle a move you reveal just that move's **one-time token** (its salt) plus a Merkle path, and the contract recomputes the leaf with `persistentHash` and checks it sits under your committed root with `merkleTreePathRoot`. Every leaf binds the `gameId`, so nothing replays across games. (The advanced version commits two MORE trees per player to make the dice roll provable — see the trust-model section.)
 
-| Tree | Depth / leaves | One leaf per… | Commits | Source |
-|------|----------------|---------------|---------|--------|
-| **Token (T)** | 14 / 16,384 | legal action `(turn, kind, cell, size)` — 81/turn | a salted **one-time token** authorizing that exact action | [`token-tree.ts`](src/sdk/crypto/token-tree.ts) |
-| **Index (I)** | 7 / 128 | turn | the mover's chosen **slot** + their **4 roll bits** | [`index-tree.ts`](src/sdk/crypto/index-tree.ts) |
-| **Random (R)** | 11 / 2,048 | `(turn, slot)` — 128 × 16 | the responder's **randomness** + their **4 roll bits** | [`random-tree.ts`](src/sdk/crypto/random-tree.ts) |
+### Identity — a witness, not a public key
 
-The **Token tree** is what makes cheating provable: there is exactly one token per `(turn, kind, cell, size)`. To play a move you reveal its token + path; the contract verifies it under your root. Reveal *two different* actions for the same turn and you've published two valid tokens for one turn — that's **equivocation**, and it's instantly punishable (below).
+A player's per-game identity is `playerId = persistentHash("nixnax:id:", gameId, localSecret)` ([`src/contract/witnesses.ts`](src/contract/witnesses.ts)), proven via the `localSecret` **witness** — the secret feeds the circuit privately and never appears on-chain. That is how `claimResult` stays winner-only without any spoofable `ownPublicKey()`.
 
-### Randomness — the joint roll
+### Randomness — the joint roll (off-chain)
 
-Each turn's roll is built from **both** players' pre-committed bits, so neither can bias it:
+Each turn's roll is built from **both** players' bits, so neither can bias it:
 
 ```
 roll = Σ ( bit_k(mover) XOR bit_k(responder) ) · 2^k     for k in 0..3   →  0..15
 remove  iff  roll < ROLL_REMOVE_THRESHOLD (= 3)          otherwise  place
 ```
 
-Because both the Index and Random trees are rooted on-chain *before any turn is played*, the bits are locked in at commit time. During a turn the mover reveals their I-leaf (which picks a `slot`), the responder reveals the R-leaf at `(turn, slot)`, and `roll = XOR` of the two 4-bit values. It's a commit-then-reveal coin flip neither side can steer ([`jointRollValue` / `classOfRoll`](src/sdk/game/rules.ts), mirrored in-circuit).
+The clients still run the full commit-then-reveal ceremony from the advanced version (each side pre-commits its bits in local Merkle trees, and reveals leaves per turn), so the dice stay fair between honest players ([`jointRollValue` / `classOfRoll`](src/sdk/game/rules.ts)). The simplified **contract** does not re-verify any of it — it trusts the agreed place/remove classes.
 
 ### Settling on-chain, in chunks
 
-At the end (or whenever a player wants to checkpoint), `settle` replays the agreed move log on-chain, verifying each move's Token-tree proof and detecting the win. It commits **up to 8 moves per transaction**:
+At the end (or whenever a player wants to checkpoint), `settle` replays the agreed move log on-chain — **up to 8 moves per transaction** (`SETTLE_CHUNK` in [`rules.ts`](src/sdk/game/rules.ts)) — verifying each move's one-time token under the mover's committed root, enforcing every board rule in-circuit (reserves, stacking, removals, pass legality), and detecting the win. So a game costs `createGame + joinGame + ⌈moves / 8⌉ settles + claimResult`, instead of one transaction per turn.
 
-```ts
-// src/sdk/game/rules.ts
-export const SETTLE_CHUNK = 8;
-// Settle commits up to this many moves per tx. 8 keeps the settle circuit
-// within the node's per-block weight budget (16 exhausted it at deploy).
-```
+### Trust model — the players
 
-`settle` records each move's roll *class* **optimistically** — it does not re-verify the I/R bits in-circuit (that would double the proof size). Instead, correctness is backstopped by a **challenge window** and fraud proofs.
-
-**Why this beats submitting every turn.** A per-turn design pays one proving transaction *per move* — up to ~128 a game, each a ZK proof plus a block. Nix-Nax plays the moves **off-chain (instant, free)** and posts only the moves that matter, **8 per `settle` tx**, ending the moment someone lines up four. So a game costs roughly `⌈moves / 8⌉` settle transactions plus one `claimResult`, instead of one transaction per turn — while the fraud-proof safety net preserves the same guarantees.
-
-### Trust model — fraud proofs & timeouts
-
-During the challenge window after a `settle`, the opponent can slash a cheater with a single proof (the game ends immediately against the cheater):
-
-- **`proveWrongParity`** — the claimed roll class doesn't match the XOR of the committed I/R bits.
-- **`proveEquivocationByX/O`** — two valid Token-tree leaves for the same turn.
-- **`proveIndexEquivocationByX/O`** — two valid Index-tree leaves for the same turn.
-- **`proveRandomEquivocationByX/O`** — two valid Random-tree leaves for the same `(turn, slot)`.
-
-If a player simply goes silent, the other arms `startTimeout` and later `claimTimeout` to claim the forfeit. Once the window closes with no successful challenge, `claimResult` finalizes the outcome and mints the win token. Wins proven by a fraud proof or claimed by timeout are equally finalizable by the winner via `claimResult`, so every win path mints. The `settle` challenge window and the `startTimeout` deadline are both bounded below on-chain (`MIN_CHALLENGE_SECS` / `MIN_TIMEOUT_SECS` in [`rules.ts`](src/sdk/game/rules.ts)), so a caller can't pick a zero-length window to skip the challenge phase or arm an instant forfeit. All of this lives in [`src/contract/NixNaxArena.compact`](src/contract/NixNaxArena.compact).
-
-**The roll-class dispute** closes the one data-availability gap in the optimistic design: `proveWrongParity` needs the mover's Index reveal, which is only exchanged off-chain — so a mover who settled turns *unilaterally* (skipping the ceremony) could fabricate a class the opponent has no evidence to slash. Instead of bloating `settle` with per-move reveal proofs, the burden shifts on demand: the responder of a committed turn calls **`challengeRoll`** to demand that turn's evidence; the mover must **`answerRollChallenge`** with *both* ceremony reveals (their Index leaf and the responder's Random leaf, verified under both committed roots, re-deriving the roll and checking it matches the claimed class) before `respondBy`, or forfeit via **`claimRollChallenge`**. A mover who skipped the ceremony never received the responder's Random leaf and cannot forge it — so *being able to answer is itself proof the ceremony happened*. Answering with a different leaf than the ceremony one only publishes equivocation evidence against yourself. Each turn is challengeable once, one challenge pends at a time, and a pending challenge blocks `claimResult`.
+**This version trusts the players.** The contract guarantees the board can never reach an illegal position (a buggy client can't corrupt a game) and that every settled move was authorized by the mover's own commitment (the token proof), but it does not try to catch a *lying* one: there are no fraud proofs, no roll verification or dispute, no timeouts, and no challenge windows. If your opponent disappears mid-game, the game simply never finishes. For how all of that is solved when players are NOT trusted — equivocation slashing over the token tree, two extra committed trees making the dice roll provable, the optimistic roll class with its dispute protocol, and timeout forfeits — read [`NixNaxArena.advanced.compact`](src/contract/NixNaxArena.advanced.compact) or check out the `advanced` tag.
 
 ---
 
 ## Win rewards — a shielded win-token
 
-When a decided game's challenge window closes, the **winner** calls `claimResult(gameId, recipient)`, which finalizes the game and **mints exactly one shielded "win token"** to them:
+When a game is decided, the **winner** calls `claimResult(gameId, recipient)` (immediately — no waiting window in this version), which finalizes the game and **mints exactly one shielded "win token"** to them:
 
 ```compact
 mintShieldedToken(pad(32, "nixnax:win"), 1, nonce, left<...>(recipient));
@@ -155,7 +138,7 @@ mintShieldedToken(pad(32, "nixnax:win"), 1, nonce, left<...>(recipient));
 src/contract/      NixNaxArena.compact — the on-chain "arena" (hosts many games) + witnesses
 src/sdk/           TypeScript SDK
   crypto/            persistent hash, the three Merkle trees, signed-move ceremony
-  game/              rules + GameSession (build/verify moves, settle, disputes)
+  game/              rules + shared move/messaging codecs
   wallet, providers  in-browser Midnight wiring (build / prove / submit)
 scripts/           stack-up · stack-down · deploy
 relay/             message-only WebSocket switchboard (server.ts)
@@ -168,12 +151,12 @@ test/              contract.sim + crypto (unit) · e2e/ (live-stack)
 ## Testing
 
 ```bash
-bun run test       # unit: contract simulation + crypto — no chain needed (113 tests)
-bun run test:e2e   # end-to-end against the live local stack (happy / fraud / timeout)
+bun run test       # unit: contract simulation + crypto — no chain needed (49 tests)
+bun run test:e2e   # end-to-end against the live local stack (happy paths)
 bun run typecheck  # tsc --noEmit
 ```
 
-`bun run test` drives the compiled circuits in pure JS via `@midnight-ntwrk/compact-runtime` — rules, lifecycle, all fraud proofs, the roll-class dispute, plus a dedicated adversarial suite (token replay, winner-flip, malicious Merkle trees, lying witnesses, the 128-turn draw, boundary values). `bun run test:e2e` deploys to a real local chain and plays full scenarios (happy / fraud / timeout, each asserting the win-token actually mints) — it needs `stack:up` running first; the suite deploys its own short-window arena (`nixnax.e2e.json`) so it never waits out production-length challenge windows.
+`bun run test` drives the compiled circuits in pure JS via `@midnight-ntwrk/compact-runtime` — lifecycle, every board rule per action kind, wins on rows/columns/diagonals, the 128-turn draw, and `claimResult` authorization (winner-only mint, draw by either, double-claim rejection). `bun run test:e2e` deploys to a real local chain and plays full games (single- and multi-chunk settles, asserting the win-token actually mints) — it needs `stack:up` running first; the suite deploys its own arena (`nixnax.e2e.json`) so it never clobbers the main one.
 
 ---
 
@@ -192,9 +175,9 @@ For a Linux server, **[`deploy/SERVER_SETUP.md`](deploy/SERVER_SETUP.md)** is th
 
 ## Known issues
 
-### Single-move opening `settle` rejected by the node (`FeeCalculation`) — needs an upstream fix
+### Single-move `settle` rejected by the node (`FeeCalculation`) — needs an upstream fix
 
-**Symptom.** The **first** `settle` of a game (from turn 0) that carries **only one move** is rejected from the mempool with `Malformed(MalformedError::FeeCalculation)` and surfaces client-side as `1010: Invalid Transaction: Custom error: 168`. It never reaches contract execution.
+**Symptom.** A `settle` that carries **only one move** can be rejected from the mempool with `Malformed(MalformedError::FeeCalculation)` ("exceeded the maximum time to dismiss for transaction size") and surfaces client-side as `1010: Invalid Transaction: Custom error: 168` / `SubmissionError`. It never reaches contract execution. The trigger is a settle transaction that is too *small* for its (constant) verification time — observed for the first 1-move settle of a game in the advanced version, and for every 1-move settle in an interim build without token-path payloads.
 
 **Root cause (not the contract).** The fee the wallet/`midnight-js` balancing attaches and the fee the node's cost model demands disagree for the smallest possible settle transaction (minimal state reads + a single write). We verified this is **not** a contract bug and **not** related to Merkle/trie insertion cost:
 
@@ -204,7 +187,7 @@ For a Linux server, **[`deploy/SERVER_SETUP.md`](deploy/SERVER_SETUP.md)** is th
 
 So the defect lives in the fee layer — the wallet SDK's estimate or the node's validator-side calculation — and needs fixing **upstream** (Midnight wallet SDK / node), not here.
 
-**Workaround.** Have a game's **first** settle batch **≥ 2 moves**. This is a client-side batching choice, not a contract rule — the contract accepts single-move settles (`assert(n > 0)`), and every later single-move settle works. Details and the isolating experiment are in [`test/e2e/timeout.test.ts`](test/e2e/timeout.test.ts).
+**Workaround.** Batch every settle with **≥ 2 moves**: the client chunker rebalances tails (…7+2 instead of 8+1, [`player-session.ts`](webapp/src/game/player-session.ts)). This is a client-side batching choice, not a contract rule — the contract accepts single-move settles (`assert(n > 0)`). A settle whose *total* new history is a single move cannot be worked around client-side until the upstream fix. (The isolating experiment lived in the advanced version's `test/e2e/timeout.test.ts` — see the `advanced` tag.)
 
 ---
 

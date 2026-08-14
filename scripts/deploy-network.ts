@@ -85,15 +85,12 @@ async function main() {
   const { NETWORK } = await import("../src/sdk/env.ts");
   const { buildAndFundWallet, ensureArenaDeployed } = await import("../src/sdk/deploy.ts");
 
-  const minWindowSecs = BigInt(process.env.MN_MIN_WINDOW_SECS ?? "600");
-
   console.log("[deploy] building + syncing wallet (funds needed on hosted networks)…");
   const wallet = await buildAndFundWallet(NETWORK, seed);
 
-  console.log("[deploy] deploying arena (stub + 16 verifier keys — ~10 min)…");
+  console.log("[deploy] deploying arena (stub + 4 verifier keys)…");
   const arena = await ensureArenaDeployed({
     wallet,
-    minWindowSecs,
     // Per-network deployment cache so networks never reuse each other's arena.
     deploymentFile: path.join(REPO_ROOT, `nixnax.${net.networkId}.json`),
   });

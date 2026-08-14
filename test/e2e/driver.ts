@@ -1,7 +1,7 @@
-// Slim e2e driver (arena edition): the arena contract is deployed ONCE for
-// the whole suite (or reused from a prior run via nixnax.undeployed.json);
-// each test opens its own GAME with a fast createGame/joinGame pair, using
-// the same deterministic fixtures as the sim tests.
+// Slim e2e driver (simplified arena): the arena contract is deployed ONCE for
+// the whole suite (or reused from a prior run via nixnax.e2e.json); each test
+// opens its own GAME with a fast createGame/joinGame pair, using the same
+// deterministic fixtures as the sim tests.
 
 import {
   ensureArenaDeployed,
@@ -16,10 +16,6 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { NETWORK } from "../../src/sdk/env.ts";
 import { packChunk, type TestPair, type ScriptMove } from "../helpers/fixtures.ts";
-
-// Short challenge/timeout/response floor for the live-stack suite (seconds).
-// The contract enforces >(now + this); tests wait it out with a small sleep.
-export const E2E_MIN_WINDOW = 5n;
 
 // Win-token domain separator — MUST byte-match the contract's pad(32,"nixnax:win").
 const WIN_DOMAIN = "nixnax:win";
@@ -66,9 +62,7 @@ function arena(): Promise<ArenaHandle> {
       wallet,
       privateStateStoreName: "nixnax-e2e-arena",
       midnightDbName: "nixnax-level-db-e2e-arena",
-      // Short window so the suite doesn't wait out real 10-minute deadlines, in
-      // its own deployment file so it never reuses (or clobbers) the main arena.
-      minWindowSecs: E2E_MIN_WINDOW,
+      // Own deployment file so it never reuses (or clobbers) the main arena.
       deploymentFile: path.resolve(
         fileURLToPath(new URL("../../nixnax.e2e.json", import.meta.url)),
       ),
@@ -82,20 +76,13 @@ export interface GameDynView {
   winner: number;
   committedTurns: number;
   turnMark: number;
-  hasDeadline: boolean;
-  hasChallenge: boolean;
 }
 
 export interface GameHandle {
   gameId: Uint8Array;
   contractAddress: string;
-  settleChunk(baseTurn: number, moves: ScriptMove[], untilTime: bigint): Promise<string>;
-  // Same, but through a specific settle entry point (2 → settle2, 11 → settle11).
-  settleChunkVariant(baseTurn: number, moves: ScriptMove[], variant: 2 | 8 | 11, untilTime: bigint): Promise<string>;
+  settleChunk(baseTurn: number, moves: ScriptMove[]): Promise<string>;
   claimResult(as?: "x" | "o"): Promise<string>;
-  startTimeoutAsX(untilTime: bigint): Promise<string>;
-  claimTimeout(): Promise<string>;
-  proveEquivocationByX(turn: number, a: ScriptMove, b: ScriptMove): Promise<string>;
   readDyn(): Promise<GameDynView>;
   readWinBalance(): Promise<bigint>;
 }
@@ -104,11 +91,11 @@ export async function openGame(pair: TestPair): Promise<GameHandle> {
   const a = await arena();
 
   let tx: any = await submitWithRetry("createGame", () => (a.found as any).callTx.createGame(
-    pair.gameId, pair.x.id, pair.x.token.root, pair.x.index.root, pair.x.random.root,
+    pair.gameId, pair.x.id, pair.x.token.root,
   ));
   console.log("createGame tx:", tx.public.txId);
   tx = await submitWithRetry("joinGame", () => (a.found as any).callTx.joinGame(
-    pair.gameId, pair.o.id, pair.o.token.root, pair.o.index.root, pair.o.random.root,
+    pair.gameId, pair.o.id, pair.o.token.root,
   ));
   console.log("joinGame tx:", tx.public.txId);
   // Let the wallet ingest joinGame's dust change before the next tx balances —
@@ -119,23 +106,15 @@ export async function openGame(pair: TestPair): Promise<GameHandle> {
   return {
     gameId: pair.gameId,
     contractAddress: a.contractAddress,
-    async settleChunk(baseTurn, moves, untilTime) {
+    async settleChunk(baseTurn, moves) {
       const c = packChunk(pair, baseTurn, moves);
       const t: any = await submitWithRetry("settle", () => (a.found as any).callTx.settle(
-        pair.gameId, c.nMoves, c.parities, c.kinds, c.cells, c.sizes, c.secrets, c.paths, untilTime,
-      ));
-      return t.public.txId as string;
-    },
-    async settleChunkVariant(baseTurn, moves, variant, untilTime) {
-      const name = variant === 8 ? "settle" : (`settle${variant}` as const);
-      const c = packChunk(pair, baseTurn, moves, variant);
-      const t: any = await submitWithRetry(name, () => (a.found as any).callTx[name](
-        pair.gameId, c.nMoves, c.parities, c.kinds, c.cells, c.sizes, c.secrets, c.paths, untilTime,
+        pair.gameId, c.nMoves, c.kinds, c.cells, c.sizes, c.secrets, c.paths,
       ));
       return t.public.txId as string;
     },
     // Finalise + mint as the WINNER. `as` selects whose secret authenticates
-    // (callerMark): "x" for the happy path, "o" for a fraud/timeout win by O.
+    // (callerMark): "x" or "o".
     async claimResult(as: "x" | "o" = "x") {
       const { found } = await attachWithSecret({
         contractAddress: a.contractAddress,
@@ -147,34 +126,6 @@ export async function openGame(pair: TestPair): Promise<GameHandle> {
       const t: any = await submitWithRetry("claimResult", () => (found as any).callTx.claimResult(pair.gameId, recipient));
       return t.public.txId as string;
     },
-    async startTimeoutAsX(untilTime) {
-      const { found } = await attachWithSecret({
-        contractAddress: a.contractAddress,
-        wallet: a.wallet,
-        secret: pair.x.secret,
-        storeSuffix: `e2e-st-${Buffer.from(pair.gameId).toString("hex").slice(0, 8)}`,
-      });
-      const t: any = await submitWithRetry("startTimeout", () => (found as any).callTx.startTimeout(pair.gameId, untilTime));
-      return t.public.txId as string;
-    },
-    async claimTimeout() {
-      const t: any = await submitWithRetry("claimTimeout", () => (a.found as any).callTx.claimTimeout(pair.gameId));
-      return t.public.txId as string;
-    },
-    async proveEquivocationByX(turn, x1, x2) {
-      const { secretFor } = await import("../../src/sdk/crypto/token-tree.ts");
-      const t = await submitWithRetry("proveEquivocationByX", () => (a.found as any).callTx.proveEquivocationByX(
-        pair.gameId,
-        BigInt(turn),
-        BigInt(x1.kind), BigInt(x1.cell), BigInt(x1.size),
-        secretFor(pair.x.token, turn, x1.kind, x1.cell, x1.size),
-        pair.x.token.pathFor(turn, x1.kind, x1.cell, x1.size),
-        BigInt(x2.kind), BigInt(x2.cell), BigInt(x2.size),
-        secretFor(pair.x.token, turn, x2.kind, x2.cell, x2.size),
-        pair.x.token.pathFor(turn, x2.kind, x2.cell, x2.size),
-      )) as any;
-      return t.public.txId as string;
-    },
     async readDyn() {
       const led = await readLedger(a.providers, a.contractAddress);
       const d = (led as any).gameState.lookup(pair.gameId);
@@ -183,8 +134,6 @@ export async function openGame(pair: TestPair): Promise<GameHandle> {
         winner: d.winner as number,
         committedTurns: Number(d.committedTurns),
         turnMark: Number(d.turnMark),
-        hasDeadline: d.hasDeadline as boolean,
-        hasChallenge: d.hasChallenge as boolean,
       };
     },
     // The suite wallet's balance of THIS arena's "nixnax:win" shielded token.
