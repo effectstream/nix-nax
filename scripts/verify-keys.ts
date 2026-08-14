@@ -1,11 +1,15 @@
 /**
- * Verify the locally-compiled prover/verifier keys match the ones deployed
- * on-chain, by checksum. `compact compile +0.31.1` is deterministic — the same
+ * Verify the locally-compiled prover/verifier keys match the committed
+ * manifest, by checksum. `compact compile +0.31.1` is deterministic — the same
  * compiler + source produce byte-identical keys — so a matching checksum means
- * the proofs this build generates will verify against the deployed contract's
- * verifier keys (and the verifier keys themselves match what was installed).
+ * your build produced exactly the circuits this source describes, and any arena
+ * deployed from the same commit will accept the proofs it generates.
  *
  *   bun run keys:verify        (after `bun run compact`)
+ *
+ * NOTE: the manifest tracks THIS SOURCE, not any particular hosted deployment —
+ * it must be regenerated whenever the contract changes. A match does not prove
+ * that some remote arena is running this code; deploy from a matching commit.
  *
  * The expected checksums live in src/contract/keys.sha256 (committed). Exits
  * non-zero on any mismatch/missing/extra key so it can gate a build or CI.
@@ -55,15 +59,15 @@ async function main() {
   if (problems.length) {
     console.error(`✗ key verification FAILED (${problems.length} problem(s)):\n` + problems.join("\n"));
     console.error(
-      `\nYour compiled keys do NOT match the deployed contract. Recompile with the\n` +
+      `\nYour compiled keys do NOT match src/contract/keys.sha256. Recompile with the\n` +
         `pinned compiler: \`compact update 0.31.1 && bun run compact\`. If it still\n` +
-        `differs, the source changed since deploy — the on-chain contract won't accept\n` +
-        `these proofs.`,
+        `differs, the contract source changed — regenerate the manifest and redeploy,\n` +
+        `because an arena deployed from the old source won't accept these proofs.`,
     );
     process.exit(1);
   }
 
-  console.log(`✓ all ${expected.size} keys match src/contract/keys.sha256 — build is consistent with the deployed contract.`);
+  console.log(`✓ all ${expected.size} keys match src/contract/keys.sha256 — build matches this source.`);
 }
 
 main().catch((e) => {

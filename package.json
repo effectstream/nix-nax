@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "NixNax (simplified teaching edition): a 4x4 stacked-pieces game on Midnight — off-chain play, on-chain settlement, shielded win-token. Trusts the players; the trustless version lives at the `advanced` tag.",
+  "license": "MIT OR Apache-2.0",
   "engines": {
     "bun": ">=1.1"
   },

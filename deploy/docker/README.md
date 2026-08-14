@@ -20,7 +20,7 @@ natively on Apple Silicon. Note the registry path is Docker Hub `midnightntwrk/*
 **private** org mirror (401/403 anonymously) — the Docker Hub copies are the
 public ones.
 
-Verified: the full 17-tx deploy (stub + 16 verifier keys) lands cleanly against
+Verified: the full 5-tx deploy (stub + 4 verifier keys) lands cleanly against
 this stack and writes `arena.json`, and our upgraded JS (ledger 8.1.0 /
 midnight-js 4.1.1) drives it end-to-end.
 

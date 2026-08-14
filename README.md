@@ -4,7 +4,7 @@
 
 A two-player **4×4 stacked-pieces game** on the [Midnight](https://midnight.network) blockchain, settled with **zero-knowledge proofs**. Moves are played **off-chain at memory speed** and only the result is committed on-chain — and the winner mints a shielded reward token.
 
-> **Two versions.** This branch carries the **SIMPLIFIED (teaching) contract**: it trusts the players not to cheat, so most of the anti-cheat machinery (fraud proofs, the roll dispute, timeouts, challenge windows, two of the three Merkle trees) is gone and the whole contract is **4 circuits** you can read in one sitting — while the game itself is unchanged. The full **trustless state-channel version** is preserved two ways: **to run it, check out the git tag `advanced`** (a complete, self-consistent snapshot — 18 circuits); **to read it side by side with this one**, open [`src/contract/NixNaxArena.advanced.compact`](src/contract/NixNaxArena.advanced.compact). That copy still compiles on its own, but it is **reference only** and will not build into this tree: the witness it needs (`wit_divMod2`), the deploy stub's ledger layout, the constructor's `minWindow` argument, the `MIN_*_SECS` constants and the multi-variant settle client were all removed here along with the machinery they served. Read the simplified contract first, then the advanced one to see what removing trust costs.
+> This branch carries the **simplified (teaching) contract**, which trusts the two players not to cheat. The full trustless version is preserved — see [Two versions](#two-versions) at the end.
 
 What the simplified contract teaches, one concept at a time ([`src/contract/NixNaxArena.compact`](src/contract/NixNaxArena.compact)):
 
@@ -99,7 +99,7 @@ When a game opens, each player commits **one Merkle root** on-chain: the root of
 
 ### Identity — a witness, not a public key
 
-A player's per-game identity is `playerId = persistentHash("nixnax:id:", gameId, localSecret)` ([`src/contract/witnesses.ts`](src/contract/witnesses.ts)), proven via the `localSecret` **witness** — the secret feeds the circuit privately and never appears on-chain. That is how `claimResult` stays winner-only without any spoofable `ownPublicKey()`.
+A player's per-game identity is `playerId = persistentHash("nixnax:id:", gameId, localSecret)` — the `playerId` circuit in [`NixNaxArena.compact`](src/contract/NixNaxArena.compact), fed by the `localSecret` **witness** implemented in [`witnesses.ts`](src/contract/witnesses.ts) and mirrored client-side by `computePlayerId` in [`persistent-hash.ts`](src/sdk/crypto/persistent-hash.ts). The secret enters the circuit privately and never appears on-chain. That is how `claimResult` stays winner-only without any spoofable `ownPublicKey()`.
 
 ### Randomness — the joint roll (off-chain)
 
@@ -132,7 +132,7 @@ mintShieldedToken(pad(32, "nixnax:win"), 1, nonce, left<...>(recipient));
 
 - **Winner-only** for decided games (enforced by `callerMark` via the `localSecret` witness); **draws mint nothing**, and a unique per-game nonce means each game mints at most once.
 - All wins share one token color, so **your balance of it = your number of wins**. The client derives the token type with `rawTokenType(pad32("nixnax:win"), contractAddress)` and reads it from the wallet's shielded balances ([`webapp/src/chain/arena.ts`](webapp/src/chain/arena.ts)).
-- The UI shows **"🏆 Win tokens: N"** in the wallet panel and an "earned a win token" badge on the win overlay ([`WalletButton.tsx`](webapp/src/ui/WalletButton.tsx), [`GameView.tsx`](webapp/src/ui/GameView.tsx)); the loser isn't shown a (failing) Redeem button ([`useChainActions.ts`](webapp/src/ui/useChainActions.ts)).
+- The count is shown as **"Wins: 🏆 N"** in the wallet panel and on the wallet chip, as a **"Win tokens"** readout in the in-game HUD, and as a **"🏆 You earned a win token!"** line on the win overlay ([`WalletButton.tsx`](webapp/src/ui/WalletButton.tsx), [`GameView.tsx`](webapp/src/ui/GameView.tsx)); the loser isn't shown a (failing) Redeem button ([`useChainActions.ts`](webapp/src/ui/useChainActions.ts)).
 
 ---
 
@@ -144,7 +144,8 @@ src/sdk/           TypeScript SDK
   crypto/            persistent hash, the three Merkle trees, signed-move ceremony
   game/              rules + shared move/messaging codecs
   wallet, providers  in-browser Midnight wiring (build / balance / submit; proofs via proof server)
-scripts/           stack-up · stack-down · deploy
+scripts/           deploy · deploy-network · upgrade-arena · faucet · verify-keys
+                   (stack:up / stack:down are docker-compose package.json scripts)
 relay/             message-only WebSocket switchboard (server.ts)
 webapp/            Vite + React client — builds and submits in the browser (proof server does the proving)
 test/              contract.sim + crypto (unit) · e2e/ (live-stack)
@@ -155,7 +156,7 @@ test/              contract.sim + crypto (unit) · e2e/ (live-stack)
 ## Testing
 
 ```bash
-bun run test       # unit: contract simulation + crypto — no chain needed (49 tests)
+bun run test       # unit: contract simulation + crypto — no chain needed (52 tests)
 bun run test:e2e   # end-to-end against the live local stack (happy paths)
 bun run typecheck  # tsc --noEmit
 ```
@@ -173,7 +174,7 @@ All configuration lives in **one root `.env`** (copy [`.env.example`](.env.examp
 
 Per network, deploy the contract once with that network's `MIDNIGHT_*` endpoints (`bun run deploy` prints the `VITE_ARENA_ADDRESS_<NETWORK>=…` line to record), then build the webapp with `VITE_NETWORK_ID` set to that network. On real networks the in-browser session wallet/faucet and genesis wallet are disabled — players connect a browser-extension wallet and pay their own gas. Endpoints must be `https`/`wss` when the site is served over TLS.
 
-For a Linux server, **[`deploy/SERVER_SETUP.md`](deploy/SERVER_SETUP.md)** is the full runbook — clone, install toolchains, compile, start the chain stack, deploy the arena, and serve the webapp, with per-step verification. Supporting files: [`deploy/nginx.conf.example`](deploy/nginx.conf.example) (serves `webapp/dist`, aliases the ~77 MB of compiled ZK assets at `/contract/compiled/nixnax-arena/`, proxies the `/relay` WebSocket) and [`deploy/nixnax-relay.service`](deploy/nixnax-relay.service) (systemd unit for the relay).
+For a Linux server, **[`deploy/SERVER_SETUP.md`](deploy/SERVER_SETUP.md)** is the full runbook — clone, install toolchains, compile, start the chain stack, deploy the arena, and serve the webapp, with per-step verification. Supporting files: [`deploy/nginx.conf.example`](deploy/nginx.conf.example) (serves `webapp/dist`, aliases the ~49 MB of compiled ZK assets at `/contract/compiled/nixnax-arena/`, proxies the `/relay` WebSocket) and [`deploy/nixnax-relay.service`](deploy/nixnax-relay.service) (systemd unit for the relay).
 
 ---
 
@@ -213,11 +214,11 @@ So the defect lives in the fee layer — the wallet SDK's estimate or the node's
 > | Compact compiler (`+`) | 0.31.1 | | `@midnight-ntwrk/ledger-v8` | 8.1.0 |
 > | Compact devtools (`compact`) | 0.5.1 | | `@midnight-ntwrk/onchain-runtime-v3` | 3.0.0 |
 > | `@midnight-ntwrk/compact-runtime` | 0.16.0 | | `@midnight-ntwrk/midnight-js-*` | 4.1.1 |
-> | `@midnight-ntwrk/compact-js` | 2.5.1 | | `@midnight-ntwrk/wallet-sdk` (set) | 1.2.0 |
+> | `@midnight-ntwrk/compact-js` | 2.5.1 | | `@midnight-ntwrk/wallet-sdk-*` (set) | facade 4.1.0, dust-wallet 4.2.0, capabilities 3.3.1, address-format 3.1.2, unshielded 3.1.0, shielded 3.0.2, hd 3.0.3, abstractions 2.1.0 |
 >
 > Preview network components: node 1.0.0, indexer 4.3.3, proof server 8.1.0. `bun run stack:up` runs exactly these versions locally from the official public Docker images (see [`deploy/docker`](deploy/docker/README.md)).
 >
-> **Reproducible keys.** `compact compile +0.31.1` is deterministic: the same compiler + source produce byte-identical prover/verifier keys. So a frontend built from this source generates proofs that verify against the verifier keys installed on-chain at deploy. `bun run keys:verify` checksums your compiled `src/contract/managed/keys/*` against the committed manifest [`src/contract/keys.sha256`](src/contract/keys.sha256) (the keys deployed on preview) and fails on any drift — run it after `bun run compact` to confirm your build matches the live contract.
+> **Reproducible keys.** `compact compile +0.31.1` is deterministic: the same compiler + source produce byte-identical prover/verifier keys. So a frontend built from this source generates proofs that verify against the verifier keys installed on-chain at deploy. `bun run keys:verify` checksums your compiled `src/contract/managed/keys/*` against the committed manifest [`src/contract/keys.sha256`](src/contract/keys.sha256) and fails on any drift — run it after `bun run compact` to confirm your build produces the same circuits as this source. The manifest holds 8 entries (prover + verifier for each of the 4 circuits) and tracks *this* contract; it is not a record of any hosted deployment, so it must be regenerated whenever the contract changes.
 
 ---
 
@@ -227,7 +228,16 @@ The product is **Nix-Nax**; the contract is **`NixNaxArena`** (on-chain identifi
 
 ## License
 
-License: TBD.
+Licensed under either of
+
+- Apache License, Version 2.0 ([`LICENSE-APACHE`](LICENSE-APACHE) · <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([`LICENSE-MIT`](LICENSE-MIT) · <http://opensource.org/licenses/MIT>)
+
+at your option — SPDX: `MIT OR Apache-2.0`.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this work by you, as defined in the Apache-2.0 license, shall
+be dual licensed as above, without any additional terms or conditions.
 
 ## Further reading
 
@@ -249,3 +259,24 @@ A game against the built-in AI on a local stack — rolling the joint dice, plac
 <video src="docs/gameplay.mp4" controls muted playsinline width="100%"></video>
 
 [▶ docs/gameplay.mp4](docs/gameplay.mp4) (2.1 MB) — plays inline in editors and docs sites that allow the `<video>` tag; on github.com it is a download link until the URL above is filled in.
+
+---
+
+## Two versions
+
+This branch carries the **SIMPLIFIED (teaching) contract**: it trusts the players not to cheat, so most of the anti-cheat machinery (fraud proofs, the roll dispute, timeouts, challenge windows, two of the three Merkle trees) is gone and the whole contract is **4 circuits** you can read in one sitting — while the game itself is unchanged.
+
+The full **trustless state-channel version** is preserved two ways:
+
+- **To run it** — check out the git tag **`advanced`**: a complete, self-consistent snapshot, 1111 lines and 18 circuits.
+- **To read it beside this one** — open [`src/contract/NixNaxArena.advanced.compact`](src/contract/NixNaxArena.advanced.compact). That copy still compiles on its own, but it is **reference only** and will not build into this tree: the witness it needs (`wit_divMod2`), the deploy stub's ledger layout, the constructor's `minWindow` argument, the `MIN_*_SECS` constants and the multi-variant settle client were all removed here along with the machinery they served.
+
+|  | `advanced` | this branch |
+|---|---|---|
+| Contract | 1111 lines, 18 circuits | 459 lines, 4 circuits |
+| Merkle roots committed per player | 3 (token, index, random) | 1 (token) |
+| `settle` circuit size | k=17 | k=15 |
+| Cheating | provable and slashable on-chain | trusted; board rules and token authorization still enforced |
+| Abandoned game | resolved by timeout forfeit | never finishes |
+
+Read the simplified contract first, then the advanced one to see what removing trust costs.
