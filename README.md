@@ -237,6 +237,15 @@ License: TBD.
 
 A game against the built-in AI on a local stack — rolling the joint dice, placing and covering pieces, settling the agreed history on-chain, and the win-token counter in the HUD.
 
+<!--
+  To get an inline player on github.com: drag docs/gameplay.mp4 into any GitHub
+  comment box (a PR, an issue, or the web README editor), then paste the
+  https://github.com/user-attachments/assets/… URL it hands back ON ITS OWN LINE
+  right here. A bare URL is what GitHub turns into a player — no markdown, no
+  <video> tag around it. A repo-relative path never plays inline on github.com,
+  which is why the link below stays as the fallback.
+-->
+
 <video src="docs/gameplay.mp4" controls muted playsinline width="100%"></video>
 
-[▶ docs/gameplay.mp4](docs/gameplay.mp4) — github.com does not play repo-relative videos inline, so the tag above renders as a player in editors and docs sites but as a link on GitHub itself. For an inline player there, drop the file into a PR or issue comment and swap in the `user-attachments` URL it returns.
+[▶ docs/gameplay.mp4](docs/gameplay.mp4) (2.1 MB) — plays inline in editors and docs sites that allow the `<video>` tag; on github.com it is a download link until the URL above is filled in.
