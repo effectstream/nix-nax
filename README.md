@@ -1,5 +1,7 @@
 # Nix-Nax
 
+![The Nix-Nax lobby: a 4×4 board floating in space, red and blue stacking pieces ranged along its edges, and the menu to start a new game, join one, or practice against the AI](docs/lobby.png)
+
 A two-player **4×4 stacked-pieces game** on the [Midnight](https://midnight.network) blockchain, settled with **zero-knowledge proofs**. Moves are played **off-chain at memory speed** and only the result is committed on-chain — and the winner mints a shielded reward token.
 
 > **Two versions.** This branch carries the **SIMPLIFIED (teaching) contract**: it trusts the players not to cheat, so most of the anti-cheat machinery (fraud proofs, the roll dispute, timeouts, challenge windows, two of the three Merkle trees) is gone and the whole contract is **4 circuits** you can read in one sitting — while the game itself is unchanged. The full **trustless state-channel version** is preserved at the git tag **`advanced`** and as a side-by-side reference copy in [`src/contract/NixNaxArena.advanced.compact`](src/contract/NixNaxArena.advanced.compact). Read the simplified contract first, then the advanced one to see what removing trust costs.
@@ -230,3 +232,11 @@ License: TBD.
 ## Further reading
 
 - [Midnight docs](https://docs.midnight.network) · [Compact language](https://docs.midnight.network/develop/reference/compact).
+
+## Watch it play
+
+A game against the built-in AI on a local stack — rolling the joint dice, placing and covering pieces, settling the agreed history on-chain, and the win-token counter in the HUD.
+
+<video src="docs/gameplay.mp4" controls muted playsinline width="100%"></video>
+
+[▶ docs/gameplay.mp4](docs/gameplay.mp4) — github.com does not play repo-relative videos inline, so the tag above renders as a player in editors and docs sites but as a link on GitHub itself. For an inline player there, drop the file into a PR or issue comment and swap in the `user-attachments` URL it returns.
