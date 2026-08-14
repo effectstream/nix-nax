@@ -9,7 +9,7 @@ import { unshieldedToken } from "@midnight-ntwrk/ledger-v8";
 import { MidnightBech32m, UnshieldedAddress } from "@midnight-ntwrk/wallet-sdk-address-format";
 import { NETWORK, NETWORK_ID, IS_UNDEPLOYED } from "../chain/env.ts";
 import { buildWallet, waitForFunds, registerNightForDust, type WalletBundle } from "../../../src/sdk/wallet.ts";
-import { getGenesisWallet, setGasWallet } from "./local-wallet.ts";
+import { getGenesisWalletWithFunds, setGasWallet } from "./local-wallet.ts";
 import { resetArena } from "../chain/arena.ts";
 import { logEvent } from "../game/log-store.ts";
 
@@ -61,7 +61,7 @@ export async function fundConnectedWallet(
     UnshieldedAddress as any,
     NETWORK.networkId as any,
   );
-  const main = await getGenesisWallet();
+  const main = await getGenesisWalletWithFunds(FUND_AMOUNT);
   log(`faucet: transferring ${FUND_AMOUNT} NIGHT from genesis → ${bech32Address.slice(0, 20)}…`);
   const transfer = [{
     type: "unshielded",
@@ -75,7 +75,7 @@ export async function fundConnectedWallet(
   const signed = await main.wallet.signRecipe(recipe, (p) => main.unshieldedKeystore.signData(p));
   const finalized = await main.wallet.finalizeRecipe(signed);
   const txHash = String(await main.wallet.submitTransaction(finalized));
-  log(`faucet: ✅ transfer tx ${txHash.slice(0, 16)}… — NIGHT will appear in your wallet shortly; it should then register it for dust (gas) generation`);
+  log(`faucet: ✅ transfer tx ${txHash.slice(0, 16)}… — NIGHT will appear in your wallet shortly. Register it for dust (gas) from your wallet's own UI.`);
   return { txHash, amount: FUND_AMOUNT };
 }
 
@@ -98,7 +98,7 @@ export async function runFaucet(log: (s: string) => void = logEvent): Promise<Fa
   }
 
   if (funds.unshielded === 0n) {
-    const main = await getGenesisWallet();
+    const main = await getGenesisWalletWithFunds(FUND_AMOUNT);
     log(`faucet: transferring ${FUND_AMOUNT} NIGHT from genesis → session…`);
     // The session wallet is in this browser, so use its own unshielded address
     // object from wallet state (same form the SDK uses for self-outputs) rather

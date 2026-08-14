@@ -208,7 +208,7 @@ export default function Home({ onOpen }: HomeProps) {
             with{" "}
             <Term word="ZK Proofs" tip="Zero-knowledge proofs: cryptography that proves a statement is true (e.g. “this move is legal”) without revealing the secret behind it." />.
             <br />
-            Place 3 pieces in a row and you win.
+            Four visible tops in a row and you win.
           </p>
 
           {view === "menu" && (

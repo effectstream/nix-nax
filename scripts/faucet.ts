@@ -10,7 +10,7 @@
 
 import { unshieldedToken } from "@midnight-ntwrk/ledger-v8";
 import { MidnightBech32m, UnshieldedAddress } from "@midnight-ntwrk/wallet-sdk-address-format";
-import { NETWORK, GENESIS_SEED } from "../src/sdk/env.ts";
+import { NETWORK } from "../src/sdk/env.ts";
 import { buildAndFundWallet } from "../src/sdk/wallet.ts";
 
 const [address, amountArg] = process.argv.slice(2);
@@ -29,8 +29,22 @@ const receiverAddress = MidnightBech32m.parse(address).decode(
   NETWORK.networkId as any,
 );
 
-console.log(`faucet: building genesis wallet…`);
-const main = await buildAndFundWallet(NETWORK, GENESIS_SEED);
+// The dev chain seeds …01/…02/…03 with NIGHT; earlier faucet runs may have
+// drained the first — use the first seed that can cover the amount.
+const GENESIS_SEEDS = ["01", "02", "03"].map((n) => "00".repeat(31) + n);
+let main;
+for (const seed of GENESIS_SEEDS) {
+  console.log(`faucet: checking genesis …${seed.slice(-2)} wallet…`);
+  const candidate = await buildAndFundWallet(NETWORK, seed);
+  const { waitForFunds } = await import("../src/sdk/wallet.ts");
+  const funds = await waitForFunds(candidate, { requireShielded: false });
+  if (funds.unshielded >= amount) { main = candidate; break; }
+  console.log(`faucet: …${seed.slice(-2)} has only ${funds.unshielded} NIGHT — trying next seed`);
+}
+if (!main) {
+  console.error("all genesis dev seeds are out of NIGHT — restart the dev chain to re-mint");
+  process.exit(1);
+}
 
 console.log(`faucet: sending ${amount} NIGHT → ${address.slice(0, 28)}…`);
 const recipe = await (main.wallet as any).transferTransaction(
@@ -42,5 +56,5 @@ const signed = await main.wallet.signRecipe(recipe, (p) => main.unshieldedKeysto
 const finalized = await main.wallet.finalizeRecipe(signed);
 const txHash = await main.wallet.submitTransaction(finalized);
 console.log(`✅ faucet tx ${txHash}`);
-console.log(`   NIGHT will appear in the wallet shortly; it registers dust (gas) itself.`);
+console.log(`   NIGHT will appear in the wallet shortly. Register it for dust (gas) from the wallet's own UI.`);
 process.exit(0);
