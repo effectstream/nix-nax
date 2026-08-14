@@ -198,7 +198,7 @@ export default function Home({ onOpen }: HomeProps) {
           <h1 className="title">Nix-Nax</h1>
           <p className="muted">
             A{" "}
-            <Term word="trustless" tip="No referee or central server to trust — the rules are enforced on-chain by the contract and cryptographic proofs, so neither player can cheat or be cheated." />{" "}
+            <Term word="friendly" tip="This simplified contract trusts the two players not to cheat: it still enforces every board rule and checks each move's committed token, but the anti-cheat machinery (fraud proofs, disputes, timeouts) is left out to keep it readable. The complete, fully trustless version lives at the `advanced` git tag." />{" "}
             game implemented in{" "}
             <Term word="Midnight" tip="A privacy-focused blockchain that runs smart contracts with zero-knowledge proofs — keeping data confidential while still publicly verifiable." />{" "}
             with{" "}
