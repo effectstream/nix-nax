@@ -1,0 +1,180 @@
+---
+SPDX-License-Identifier: Apache-2.0
+copyright: This file is part of Midnight Docs. Copyright (C) Midnight Foundation. Licensed under the Apache License, Version 2.0 (the "License"); You may not use this file except in compliance with the License. You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
+sidebar_label: The contract
+title: The contract
+description: "Build the Nix-Nax arena contract: game state keyed by ID, witness identity, one-time action tokens, chunked settlement, and a shielded win token."
+sidebar_position: 2
+toc_max_heading_level: 2
+keywords: [midnight, compact, merkle, one-time token, settle, witness, shielded token, circuit]
+tags: [tutorials, advanced, compact, zero-knowledge, settlement]
+---
+
+# The contract
+
+`src/contract/NixNaxArena.compact` holds five exported circuits. Two open a game, one settles moves, one finalizes and mints, and the rest are helpers.
+
+Read it in the order below. Each section covers one idea and shows the code that implements it.
+
+## State keyed by a game ID
+
+One deployment hosts every game. Every ledger value is a `Map` keyed by a 32-byte `gameId` the client picks, so opening a game is one call rather than a deploy.
+
+```compact
+export ledger gameKeys: Map<Bytes<32>, GameKeys>;
+export ledger gameState: Map<Bytes<32>, GameDyn>;
+export ledger boards: Map<Bytes<32>, Map<Uint<16>, Uint<8>>>;
+export ledger tops: Map<Bytes<32>, Map<Uint<16>, Uint<8>>>;
+export ledger reserves: Map<Bytes<32>, Map<Uint<16>, Uint<8>>>;
+export ledger actionLogs: Map<Bytes<32>, Map<Uint<16>, Uint<16>>>;
+```
+
+`GameKeys` holds the two player identities and their two token roots, written once and never changed. `GameDyn` holds the four values that move: whose turn it is, how many moves have settled, the status, and the winner.
+
+`createGame` writes both structs and fills the reserves with three pieces of each size per player. `joinGame` adds the second identity and root, then flips the status to `inProgress`.
+
+Two asserts in `joinGame` matter more than they look:
+
+```compact
+assert(disclose(cO) != pad(32, ""), "player identity must not be zero");
+assert(disclose(cO) != k.idX, "joiner identity must differ from the creator's");
+```
+
+The zero identity is the sentinel for "no player yet", so a real registration must never equal it. And if both players registered the same identity, the code that works out whose turn it is would always answer X, and the winner check would break.
+
+## Player identity from a witness
+
+The contract never stores a public key. It hashes the caller's secret with the game ID:
+
+```compact
+circuit playerId(gameId: Bytes<32>, secret: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<3, Bytes<32>>>([pad(32, "nixnax:id:"), gameId, secret]);
+}
+```
+
+`localSecret()` is a witness, so the secret stays on the player's device. To check who is calling, the circuit recomputes the hash and compares it against the two stored identities:
+
+```compact
+circuit callerMark(gameId: Bytes<32>): Uint<8> {
+  const k = gameKeys.lookup(gameId);
+  const h = playerId(gameId, localSecret());
+  const isX = h == k.idX;
+  const isO = h == k.idO;
+  assert(isX || isO, "caller must prove knowledge of a registered player secret");
+  return isX ? 1 : 2;
+}
+```
+
+Because the game ID is part of the hash, the same secret produces a different identity in every game.
+
+:::warning ownPublicKey() would not work here
+
+`ownPublicKey()` is a witness the caller controls, and the protocol does not check it against the signing wallet. Comparing it against a stored value compares two values the caller chose. See [Security and best practices](../../guides/security-best-practices#authenticating-a-caller-with-a-derived-identity).
+
+:::
+
+## One-time action tokens
+
+This is the part that makes off-chain play safe.
+
+Before the game starts, each player builds a Merkle tree of 16384 leaves, one per possible action across 128 turns. Each turn gets a block of 128 slots: 64 places, 16 removes, one pass, and padding. Each real leaf is a hash of what the action is, plus a random secret:
+
+```compact
+struct TokenPreimage {
+  domainSep: Bytes<32>,
+  gameId: Bytes<32>,
+  turn: Uint<16>,
+  kind: Uint<8>,
+  cell: Uint<8>,
+  size: Uint<8>,
+  secret: Bytes<32>,
+}
+```
+
+The player commits only the root, at `createGame` or `joinGame`. Nothing about the tree's contents reaches the chain.
+
+To settle a move, the player reveals that leaf's secret and its Merkle path. The circuit rebuilds the leaf and checks the path leads to the committed root:
+
+```compact
+circuit tokenIsUnder(
+  root: MerkleTreeDigest,
+  gid: Bytes<32>,
+  turn: Uint<16>,
+  kind: Uint<8>,
+  cell: Uint<8>,
+  size: Uint<8>,
+  secret: Bytes<32>,
+  path: MerkleTreePath<14, Bytes<32>>
+): Boolean {
+  const leaf = tokenLeaf(gid, turn, kind, cell, size, secret);
+  return path.leaf == leaf
+      && merkleTreePathRoot<14, Bytes<32>>(path).field == root.field;
+}
+```
+
+Three properties fall out of this. The leaf binds the turn number, so a token cannot move to a different turn. It binds the game ID, so it cannot cross games. And the secret is random, so nobody can guess a leaf they were not given.
+
+## Settling moves
+
+`settle` takes up to eight moves at a time. Each move arrives as four parallel vectors plus its token secret and path:
+
+```compact
+export circuit settle(
+  gameId: Bytes<32>,
+  nMoves: Uint<8>,
+  kinds: Vector<8, Uint<8>>,
+  cells: Vector<8, Uint<8>>,
+  sizes: Vector<8, Uint<8>>,
+  secrets: Vector<8, Bytes<32>>,
+  paths: Vector<8, MerkleTreePath<14, Bytes<32>>>
+): []
+```
+
+The loop runs eight times and skips the empty slots, because a Compact circuit needs a fixed shape. For each real move it does four things in order.
+
+First, it works out whose move this is. `committedTurns` gives the absolute turn number, and the mover alternates from there.
+
+Second, it checks the token against that mover's root:
+
+```compact
+const root = isXTurn ? keys.rootX : keys.rootO;
+assert(
+  tokenIsUnder(root, gid, tAbs, kind, cell, size, disclose(secrets[i]), disclose(paths[i])),
+  "invalid one-time token for this (turn, action)"
+);
+```
+
+Third, it applies the move and asserts the board rules. A placement takes a piece from the reserve and checks nothing of that size or larger already sits in the cell. A removal finds the visible piece, returns it to its owner's reserve, and reveals what was under it. A pass is only legal when nothing is removable anywhere.
+
+Fourth, it checks for a win by reading the visible tops and looking for four in a row. The mover wins ties, and the loop refuses any move after a win:
+
+```compact
+const dCur = gameState.lookup(gid);
+assert(dCur.winner == Winner.none, "moves after game end");
+```
+
+After the loop, `settle` writes back the new turn count, whose turn is next, and the winner. At 128 settled turns with no winner, the game is a draw.
+
+Because state lives in the ledger rather than in the circuit, the next `settle` call picks up exactly where this one stopped. That is what makes chunking work.
+
+## Finalizing and minting
+
+`claimResult` closes a decided game and mints one shielded token to the winner:
+
+```compact
+const nonce = persistentHash<Vector<2, Bytes<32>>>([pad(32, "nixnax:win:nonce:"), gid]);
+mintShieldedToken(pad(32, "nixnax:win"), 1, nonce,
+  left<ZswapCoinPublicKey, ContractAddress>(disclose(recipient)));
+```
+
+The token colour is the same for every game, so a player's balance of it is their win count. The nonce comes from the game ID, so each game mints once.
+
+Only the winner can call this on a decided game, which `callerMark` enforces. A draw finalizes without minting, and either player can do it.
+
+## Compile it
+
+```bash
+bun run compact
+```
+
+This writes the generated contract, prover keys, and verifier keys to `src/contract/managed/`. [Playing a game](./cli) uses them.

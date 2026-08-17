@@ -1,0 +1,61 @@
+---
+SPDX-License-Identifier: Apache-2.0
+copyright: This file is part of Midnight Docs. Copyright (C) Midnight Foundation. Licensed under the Apache License, Version 2.0 (the "License"); You may not use this file except in compliance with the License. You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
+sidebar_label: Overview
+title: Settle an off-chain game on Midnight
+description: "Build a two-player board game played entirely off-chain and settled on-chain in a few transactions, with the contract still refusing illegal positions."
+sidebar_position: 1
+toc_max_heading_level: 2
+keywords: [midnight, compact, merkle, commitment, settlement, game, zero-knowledge, shielded token]
+tags: [tutorials, advanced, compact, zero-knowledge, settlement, game]
+---
+
+# Settle an off-chain game on Midnight
+
+In this tutorial you build Nix-Nax, a two-player board game. The players agree every move between themselves, and the chain sees only the result. A full game costs a few transactions instead of one per turn, and the contract still rejects any position the rules forbid.
+
+## The problem
+
+Put every move on-chain and a 40-turn game costs 40 transactions, each waiting for a block.
+
+Play off-chain and two questions come up. What stops a player claiming a move their opponent never agreed to? And what stops the same move being sent twice?
+
+One-time action tokens answer both. Before the game starts, each player builds a Merkle tree with one leaf per possible move, and commits its root on-chain. Settling a move reveals that one leaf and its path, and the circuit checks the leaf sits under the mover's root. The rest of the tree stays hidden. Each leaf includes a turn number, so a token used at turn 7 cannot be used again at turn 12.
+
+## What you build
+
+One contract that hosts any number of games at once. Two players open a game, play it in their browsers, then settle the agreed moves eight at a time. The winner mints a shielded token.
+
+By the end you will be able to do the following:
+
+- Key all contract state by a game ID the client generates, so one deployment serves many games.
+- Work out a player's identity from a secret witness, with no public key anyone can fake.
+- Commit a Merkle root of one-time action tokens, then spend them one at a time.
+- Replay the agreed moves in the circuit, checking every board rule as you go.
+- Settle a long game in chunks that carry state from one transaction to the next.
+- Mint a shielded token to the winner.
+
+## What this version trusts
+
+The contract you build trusts the players about one thing: the dice.
+
+A joint dice roll decides what kind of move each turn allows, and that roll happens off-chain. The contract takes the players' word for it. It has no fraud proofs, no roll checking, no timeouts, and no challenge window. If a player stops responding halfway through, the game stays unsettled.
+
+The contract checks everything else. Board rules run in the circuit, so a broken or dishonest client cannot write an illegal position. The token scheme stops either player inventing a move or replaying an old one.
+
+The repository also holds a trustless version, `NixNaxArena.advanced.compact`, which adds the dispute handling. Read this one first, since the ideas carry over.
+
+## Prerequisites
+
+- Familiarity with Compact witnesses and `disclose()`. If either is new, read [Smart contract security](../../compact/smart-contract-security) first.
+- The [Compact CLI](../../getting-started/installation), with `compact compile` working.
+- [Bun](https://bun.sh), which the repository uses for its scripts and tests.
+- A completed beginner tutorial. [Bulletin board](../bboard/index) covers deploying a contract and calling it from a DApp.
+
+## How this tutorial is organized
+
+[The contract](./smart-contract) builds `NixNaxArena.compact` one circuit at a time: identity, the token commitment, the settlement loop, and the mint.
+
+[Playing a game](./cli) runs a full game against a local network, from opening it through settling it to checking the winner's token.
+
+This tutorial links the board mechanics, the reserve counting, and the client-side rules engine rather than walking through them.

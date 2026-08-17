@@ -1,0 +1,107 @@
+---
+SPDX-License-Identifier: Apache-2.0
+copyright: This file is part of Midnight Docs. Copyright (C) Midnight Foundation. Licensed under the Apache License, Version 2.0 (the "License"); You may not use this file except in compliance with the License. You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
+sidebar_label: Playing a game
+title: Playing a game
+description: "Run the local Midnight stack, deploy the arena contract, play a full Nix-Nax game in the browser, and check the winner's shielded token."
+sidebar_position: 3
+toc_max_heading_level: 2
+keywords: [midnight, compact, deploy, local network, proof server, relay, settle, shielded token]
+tags: [tutorials, advanced, compact, deployment, settlement]
+---
+
+# Playing a game
+
+Run the contract from the previous page against a local Midnight network, play a full game in the browser, and check the token the winner mints.
+
+## Prerequisites
+
+- macOS or Linux.
+- [Bun](https://bun.sh) 1.1 or later. The repository uses it as both runtime and package manager.
+- The Compact compiler, with `compact update 0.31.1` installed. The build calls that version directly and does not download it for you.
+- Docker with Compose, for the local node, indexer, and proof server.
+
+{/* _mod-docs-content-type: PROCEDURE */}
+## Start the stack and deploy
+
+### Procedure
+
+1. Install dependencies and compile the contract:
+
+   ```bash
+   bun install
+   bun run compact
+   ```
+
+2. Start the local Midnight network. This brings up a node on 9944, an indexer on 8088, and a proof server on 6300:
+
+   ```bash
+   bun run stack:up
+   ```
+
+3. Deploy the arena. This writes the contract address to `webapp/public/arena.json`, which the web client reads:
+
+   ```bash
+   bun run deploy
+   ```
+
+4. Start the relay. It is a WebSocket switchboard that passes off-chain moves between the two players, and every game needs it:
+
+   ```bash
+   (cd relay && bun install && bun run start)
+   ```
+
+5. Start the web client in another terminal:
+
+   ```bash
+   (cd webapp && bun install && bun run dev)
+   ```
+
+### Verification
+
+The node, indexer, and proof server report healthy, and the deploy step prints a contract address.
+
+```bash
+docker compose -f deploy/docker/network-compose.yml ps
+```
+
+{/* _mod-docs-content-type: PROCEDURE */}
+## Play a game
+
+### Procedure
+
+1. Open `http://localhost:5173` and select **Wallet**, then use the faucet to fund the in-browser session wallet.
+
+2. Select **New game**. The client generates a game ID, builds your token tree, and calls `createGame` with your identity and root.
+
+3. Copy the game ID. In a second browser, fund another wallet and select **Join a game** with that ID, which calls `joinGame`.
+
+4. Play. Each turn runs through the relay: both clients agree the roll, the mover picks an action, and both sides record it. Nothing touches the chain.
+
+5. Settle. The client calls `settle` with up to eight moves per transaction, each carrying its token secret and Merkle path.
+
+6. When the game ends, the winner calls `claimResult`, which mints one `nixnax:win` token.
+
+To play both sides yourself, use **Practice vs AI**, which still routes moves through the relay.
+
+### Verification
+
+The winner's wallet holds one `nixnax:win` token. Check the balance in the wallet panel, and check the contract's public state to confirm the game reads as settled with the expected winner.
+
+## What the chain saw
+
+A finished game leaves this on-chain: two identity commitments, two token roots, the final board, the action log, and one settled status with a winner. It never saw the players' secrets, the unused parts of either token tree, or the dice rolls.
+
+Transaction count is `createGame` plus `joinGame`, one `settle` per eight moves, plus `claimResult`. A 40-move game takes seven transactions instead of forty.
+
+## Clean up
+
+```bash
+bun run stack:down
+```
+
+## Next steps
+
+- `NixNaxArena.advanced.compact` in the same repository adds fraud proofs, roll verification, timeouts, and challenge windows. The concepts here carry over.
+- [Security and best practices](../../guides/security-best-practices) covers the derived-identity pattern, replay protection, and what a chain observer sees.
+- [Deploying and operating a contract](../../guides/deploy-and-operate) covers moving from the local network to a public one.
