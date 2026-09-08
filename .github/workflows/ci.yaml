@@ -44,13 +44,19 @@ jobs:
           (cd webapp && bun install --frozen-lockfile)
 
       - name: Compile the Compact contracts
-        run: npm run compact
+        run: |
+          npm run compact
+          npm run compact:advanced
 
       - name: Verify generated key manifest
-        run: bun run keys:verify
+        run: |
+          bun run keys:verify
+          bun run keys:verify:advanced
 
       - name: Run contract and crypto tests
-        run: npm test
+        run: |
+          npm test
+          npm run test:advanced
 
       - name: Run browser-module tests
         run: npm run test:webapp
@@ -58,6 +64,7 @@ jobs:
       - name: Typecheck root and browser projects
         run: |
           npm run typecheck
+          npm run typecheck:advanced
           npm run typecheck:webapp
 
       - name: Build browser application

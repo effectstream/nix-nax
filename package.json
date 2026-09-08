@@ -12,6 +12,7 @@
   "packageManager": "bun@1.3.11",
   "scripts": {
     "compact": "compact compile +0.31.1 src/contract/NixNaxArena.compact src/contract/managed/ && compact compile +0.31.1 src/contract/NixNaxArenaStub.compact src/contract/managed-stub/",
+    "compact:advanced": "compact compile +0.31.1 advanced/contract/NixNaxArena.compact advanced/contract/managed/ && compact compile +0.31.1 advanced/contract/NixNaxArenaStub.compact advanced/contract/managed-stub/",
     "stack:up": "docker compose -f deploy/docker/network-compose.yml --env-file deploy/docker/network.env up -d",
     "stack:down": "docker compose -f deploy/docker/network-compose.yml down -v",
     "deploy": "bun run scripts/deploy.ts",
@@ -19,10 +20,14 @@
     "deploy:net": "bun run scripts/deploy-network.ts",
     "upgrade:arena": "bun run scripts/upgrade-arena.ts",
     "keys:verify": "bun run scripts/verify-keys.ts",
+    "keys:verify:advanced": "bun run advanced/scripts/verify-keys.ts",
     "test": "vitest run test/contract.sim.test.ts test/crypto.test.ts",
+    "test:advanced": "vitest run --config advanced/vitest.config.ts advanced/test/contract.sim.test.ts advanced/test/crypto.test.ts",
     "test:webapp": "npm --prefix webapp run test",
     "test:e2e": "vitest run test/e2e --testTimeout=900000 --no-file-parallelism --pool=forks --poolOptions.forks.singleFork",
+    "test:e2e:advanced": "vitest run --config advanced/vitest.config.ts advanced/test/e2e/protocol-repair.test.ts --testTimeout=900000 --no-file-parallelism --pool=forks --poolOptions.forks.singleFork",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:advanced": "tsc -p advanced/tsconfig.json --noEmit",
     "typecheck:webapp": "npm --prefix webapp run typecheck",
     "build:webapp": "npm --prefix webapp run build",
     "check": "npm test && npm run test:webapp && npm run typecheck && npm run typecheck:webapp && npm run build:webapp"
