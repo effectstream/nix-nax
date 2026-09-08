@@ -180,9 +180,11 @@ production web build. Local-ledger E2E remains an explicit longer-running check.
   an existing role and disconnect that socket. One-time action commitments
   still protect on-chain settlement, but the bundled relay is suitable for
   local/demo coordination, not an availability-sensitive public service.
-- A single-move `settle` has been rejected by the tested local node fee layer.
-  The client batches settlement when possible; a history containing only one
-  move has no client-side workaround.
+- On a fresh local stack using `midnight-node:1.0.0` with `ledger-v8:8.1.0`,
+  three attempts at one legal opening-move `settle` were rejected by the node
+  as `Malformed(FeeCalculation)`. This is a measured limitation of that tested
+  stack, not a claim about every deployment. The client batches settlement when
+  possible; a history containing only one move has no client-side workaround.
 
 For hosted deployment details, see [`deploy/SERVER_SETUP.md`](deploy/SERVER_SETUP.md).
 
