@@ -130,10 +130,34 @@ history-cap loss beyond the immediately replayable messages need an
 authenticated turn/hash handshake, acknowledgements, and a broader protocol
 redesign before this can be treated as robust public multiplayer transport.
 
-## C. Keep the complete protocol separate
+## C. Study the maintained advanced protocol separately
 
-[`../advanced/README.md`](../advanced/README.md) contains the original complete
-contract as a reference. It adds commitment trees, disputes, deadlines,
-timeouts, and fraud-proof circuits, but four known defects invalidate its
-security/liveness claims. It is excluded from default compilation and is not a
-supported deployment. Study it only after the main contract and chain path.
+[`../advanced/README.md`](../advanced/README.md) documents a maintained,
+standalone dispute-capable contract and SDK. It adds canonical I/R proof paths,
+bounded deadlines, move and roll disputes, timeout outcomes, and an on-chain
+entropy request/response path with a withholding forfeit. Study it after the
+main contract and browser-to-chain path; it is deliberately not wired into the
+complete game UI.
+
+The advanced topic has explicit build and test commands instead of extending
+the default main-contract suite:
+
+```sh
+npm run compact:advanced
+bun run keys:verify:advanced
+npm run typecheck:advanced
+npm run test:advanced
+```
+
+Its focused local-ledger scenarios run separately with
+`npm run test:e2e:advanced` against a fresh local stack and freshly generated
+proving artifacts. The repaired contract changes the historical constructor,
+ABI, and ledger layout, so deploy a fresh advanced arena and never attach it to
+an old advanced address or reuse old deployment JSON.
+
+The protocol remains optimistic.
+Participants must monitor the chain and act within configured windows; clients
+still need reliable transport and persistence for the wider off-chain ceremony;
+and the arena maintainer retains verifier-key maintenance authority. The topic
+has focused simulator and local-ledger tests, but no production UI integration
+or formal security audit.
