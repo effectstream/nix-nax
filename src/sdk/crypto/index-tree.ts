@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Per-player I-tree: the mover's pre-committed (slot, parity-bit) per turn.
 //
 // Layout — 128 turns -> 128 leaves, depth-7 tree. Leaf index = turn.

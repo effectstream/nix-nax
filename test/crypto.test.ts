@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Crypto + rules tests (arena edition) — trees bound to a gameId, leaf
 // encodings with 4 roll bits, the joint roll + class, the three-message
 // ceremony, SignedMove verification, fraud-proof builders, and wire serde.

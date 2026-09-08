@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Browser build of the NixNaxArena compiled contract. Mirrors makeCompiled()
 // in src/sdk/deploy.ts, but `withCompiledFileAssets` points at the HTTP path the
 // vite dev middleware serves (src/contract/managed) instead of a filesystem dir —

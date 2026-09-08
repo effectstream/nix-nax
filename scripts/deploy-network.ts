@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /**
  * Deploy NixNaxArena to a chosen Midnight network and record the contract
  * address in the repo-root .env as `VITE_ARENA_ADDRESS_<NETWORK>` — the exact

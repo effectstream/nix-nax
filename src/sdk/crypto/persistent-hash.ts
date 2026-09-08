@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Thin TS wrappers around `@midnight-ntwrk/compact-runtime` hashing primitives.
 //
 // Everything here mirrors the IN-CIRCUIT algorithm of NixNaxArena.compact

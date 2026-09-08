@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // All on-chain actions + their eligibility, as a hook. Shared by the
 // blockchain-actions drawer (GameMenu) and the win overlay so the settle /
 // claim logic lives in exactly one place. Logging goes to the JS console via
@@ -11,6 +15,7 @@ import { useState } from "react";
 import { api, type ContractState } from "../chain/arena.ts";
 import { logEvent } from "../game/log-store.ts";
 import type { PlayerSession } from "../game/player-session.ts";
+import { isConnected, openWalletModal, useWallet } from "../wallet/useWallet.ts";
 
 const hex = (b: Uint8Array) => Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("");
 
@@ -46,13 +51,14 @@ export function useChainActions(
   const [busy, setBusy] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const walletConnected = isConnected(useWallet());
 
   // Status enum: 0=halfOpen, 1=inProgress, 2=settled.
   const settled = chain?.status === 2;
   const halfOpen = chain?.status === 0;
   const chainDecided = (chain?.winner ?? 0) !== 0;
   const canSettle =
-    !settled && !halfOpen && !chainDecided &&
+    walletConnected && !settled && !halfOpen && !chainDecided &&
     session.committedTurns > (chain?.committedTurns ?? 0);
   // A decided game (winner x=1 / o=2) can only be finalised by the winner — who
   // mints the win-token. A draw is finalisable by either participant (no mint).
@@ -61,9 +67,14 @@ export function useChainActions(
   const decidedWinner = chain?.winner === 1 || chain?.winner === 2;
   const iWon = decidedWinner && chain?.winner === myMark;
   const canClaimResult =
-    !settled && !halfOpen && chainDecided && (!decidedWinner || iWon);
+    walletConnected && !settled && !halfOpen && chainDecided && (!decidedWinner || iWon);
 
   const wrap = (label: string, fn: () => Promise<unknown>) => () => {
+    if (!walletConnected) {
+      setError("Connect a wallet before submitting an on-chain transaction.");
+      openWalletModal();
+      return;
+    }
     setError(null);
     setBusy(label);
     setStatus("Building + proving the transaction — approve in your wallet when prompted…");

@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Browser `crypto` shim: crypto-browserify lacks `timingSafeEqual`, which
 // midnight-js uses (private-state signing / contract attach). Re-export
 // crypto-browserify and add a constant-time `timingSafeEqual`. Aliased in

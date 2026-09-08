@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // AI move policy — the single swappable seam for the "Practice vs AI" feature.
 // v1 is a basic heuristic (win → block → greedy place / threat-remove / pass).
 // It reads everything from rules.ts, so it automatically targets the live

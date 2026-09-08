@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Shared deterministic key material for the test suites (arena edition).
 // Each fixture pair plays in its own GAME on the shared arena contract: the
 // pair carries a deterministic gameId, and every tree binds it.

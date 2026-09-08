@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Arena deploy + attach helpers. The NixNaxArena contract is deployed ONCE
 // per chain (small stub tx + one maintenance tx per verifier key, see
 // NixNaxArenaStub.compact); afterwards every game is a fast `createGame`
@@ -204,9 +208,9 @@ export async function insertMissingVerifierKeys(opts: {
 }
 
 // Build a PROVEN but UNBOUND, dust-less call tx (no fees, NOT submitted) and
-// return it hex-serialized. A connected browser wallet then balances the dust
-// + submits it — so the PLAYER pays their own gas. Relay-pays actions keep
-// using the cached `found.callTx.*` path (which balances dust + submits here).
+// return it hex-serialized. An integration caller can pass it to a connected
+// browser wallet for balancing, signing, and submission. The message relay is
+// not involved in transactions and never pays chain fees.
 const toHexStr = (b: Uint8Array) => Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("");
 export async function buildDustlessCallTxHex(
   handle: ArenaHandle,
@@ -228,7 +232,7 @@ export async function buildDustlessCallTxHex(
 }
 
 // A fresh attach with a specific player secret in private state — needed by
-// startTimeout, whose circuit consumes the localSecret witness.
+// claimResult, whose callerMark helper consumes the localSecret witness.
 export async function attachWithSecret(opts: {
   contractAddress: string;
   wallet: WalletBundle;

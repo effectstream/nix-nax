@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Browser faucet (undeployed dev). Moves NIGHT from the genesis "main" wallet to
 // a fresh, persisted session wallet, then registers that NIGHT for dust
 // generation and makes the session wallet the active gas wallet — so each

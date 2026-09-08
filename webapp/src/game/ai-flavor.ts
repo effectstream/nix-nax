@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Flavour copy for the AI's turn. The local AI computes its move off-chain, so
 // its turn can take a beat — a static "Waiting…" reads as frozen / buggy. While
 // it thinks we cycle through these instead, so it clearly looks like it's working.

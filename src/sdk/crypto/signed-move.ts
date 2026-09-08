@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Off-chain messages for the 4×4 stacked-pieces game (arena edition). The
 // channelId of every message IS the gameId (32 bytes, hex-encoded) — all
 // leaf preimages bind it, so nothing replays across games.
@@ -140,9 +144,10 @@ export function hashSignedMove(m: SignedMove): Uint8Array {
 
 // ── Stand-alone reveal verification (used mid-ceremony) ────────────────────
 
-// Root parameters are NULLABLE: the simplified (trusting) contract keeps no
-// Merkle roots on-chain, so a null root skips ONLY the root-membership check —
-// every other integrity check (leaf preimage, legality, hash-link) still runs.
+// Root parameters are NULLABLE: the simplified contract omits the advanced
+// I/R ceremony roots (while still committing action-token roots on-chain), so
+// a null I/R root skips ONLY this ceremony membership check. Every other
+// integrity check (leaf preimage, legality, hash-link) still runs.
 export function verifyIntent(
   it: Intent,
   expectedChannelId: string,

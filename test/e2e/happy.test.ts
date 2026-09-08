@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // E2E happy path (simplified arena): one-time arena deploy for the suite, then
 // a fast createGame/joinGame, a scripted 7-move X-win (4-in-a-row) settled in
 // ONE chunk, and an immediate claimResult (no challenge window in the
@@ -51,23 +55,26 @@ describe("e2e: happy path", () => {
     const pair = freshPlayers(SCHEDULE_C);
     const g = await openGame(pair);
 
-    // 9 moves split 7 + 2 — NEVER a 1-move chunk: the node's fee layer rejects
+    // 11 moves split 8 + 3 — NEVER a 1-move chunk: the node's fee layer rejects
     // minimal-transcript settle txs (Malformed(FeeCalculation), see README
     // "Known issues"), which with this contract means any single-move settle.
-    // Script: t0 X@0, t1 O@4, t2 X@1, t3 O@5, t4 X@2, t5 O@6, t6 X s1@8,
-    // t7 O s1@9, t8 X s1@3 -> X's row 0 completes on turn 8 (chunk 2, move 2).
-    const moves = [P(0, 0), P(4, 0), P(1, 0), P(5, 0), P(2, 0), P(6, 0), P(8, 1)];
+    // t6 X places at 8; t7 O removes it, returning the piece to X's reserve.
+    const moves = [P(0, 0), P(4, 0), P(1, 0), P(5, 0), P(2, 0), P(6, 0), P(8, 1), R(8)];
     const tx1 = await g.settleChunk(0, moves);
     console.log("settle chunk 1 txId:", tx1);
     let d = await g.readDyn();
-    expect(d.committedTurns).toBe(7);
+    expect(d.committedTurns).toBe(8);
     expect(d.winner).toBe(Winner.none);
-    expect(d.turnMark).toBe(2); // O to move next
+    expect(d.turnMark).toBe(1); // X to move next
+    expect(await g.readAction(7)).toBe(KIND_REMOVE * 64 + 8);
+    expect(await g.readTop(8)).toBe(0);
+    expect(await g.readReserve(1, 1)).toBe(3);
 
-    const tx2 = await g.settleChunk(7, [P(9, 1), P(3, 1)]);
+    // X re-places the returned piece; after O's reply, X completes row 0.
+    const tx2 = await g.settleChunk(8, [P(8, 1), P(9, 1), P(3, 1)]);
     console.log("settle chunk 2 txId:", tx2);
     d = await g.readDyn();
-    expect(d.committedTurns).toBe(9);
+    expect(d.committedTurns).toBe(11);
     expect(d.winner).toBe(Winner.x);
 
     // The loser (O) cannot finalise a decided game.
