@@ -1,0 +1,85 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+// NixNaxArenaStub.compact
+// DEPLOY-ONLY twin of NixNaxArena.compact: identical ledger declarations
+// (same order — state layout must match) with ZERO exported circuits and an
+// matching configuration-only constructor. The arena deploys ONCE per chain via this stub (small
+// tx), then each circuit's verifier key is inserted in its own maintenance
+// transaction. See NixNaxArena.compact / deploy.ts.
+//
+// KEEP IN SYNC with NixNaxArena.compact's ledger declarations.
+
+pragma language_version >= 0.16.0;
+
+import CompactStandardLibrary;
+
+export enum Status { halfOpen, inProgress, settled }
+export enum Winner { none, x, o, draw }
+
+struct GameKeys {
+  idX: Bytes<32>,
+  idO: Bytes<32>,
+  rootX: MerkleTreeDigest,
+  rootO: MerkleTreeDigest,
+  rootIdxX: MerkleTreeDigest,
+  rootIdxO: MerkleTreeDigest,
+  rootRndX: MerkleTreeDigest,
+  rootRndO: MerkleTreeDigest,
+}
+
+struct GameDyn {
+  turnMark: Uint<8>,
+  committedTurns: Uint<8>,
+  status: Status,
+  winner: Winner,
+  deadline: Uint<64>,
+  hasDeadline: Boolean,
+  challengeUntil: Uint<64>,
+  hasChallenge: Boolean,
+  challengeTurn: Uint<16>,
+  hasRollChallenge: Boolean,
+  respondBy: Uint<64>,
+}
+
+struct EntropyRequest {
+  turn: Uint<16>,
+  slot: Uint<8>,
+  respondBy: Uint<64>,
+}
+
+struct EntropyResponse {
+  slot: Uint<8>,
+  b0: Uint<8>,
+  b1: Uint<8>,
+  b2: Uint<8>,
+  b3: Uint<8>,
+  random: Bytes<32>,
+  path: MerkleTreePath<11, Bytes<32>>,
+}
+
+export ledger gameKeys: Map<Bytes<32>, GameKeys>;
+export ledger gameState: Map<Bytes<32>, GameDyn>;
+export ledger boards: Map<Bytes<32>, Map<Uint<16>, Uint<8>>>;
+export ledger tops: Map<Bytes<32>, Map<Uint<16>, Uint<8>>>;
+export ledger reserves: Map<Bytes<32>, Map<Uint<16>, Uint<8>>>;
+export ledger actionLogs: Map<Bytes<32>, Map<Uint<16>, Uint<16>>>;
+export ledger rollAnswered: Map<Bytes<32>, Map<Uint<16>, Boolean>>;
+export ledger entropyRequests: Map<Bytes<32>, EntropyRequest>;
+export ledger entropyResponses: Map<Bytes<32>, Map<Uint<16>, EntropyResponse>>;
+export sealed ledger minWindowSecs: Uint<64>;
+export sealed ledger maxWindowSecs: Uint<64>;
+
+// The stub is what is actually deployed (then circuits are attached), so its
+// constructor sets the shared config the real circuits read. MUST match
+// NixNaxArena.compact's constructor.
+constructor(minWindow: Uint<64>, maxWindow: Uint<64>) {
+  const min = disclose(minWindow);
+  const max = disclose(maxWindow);
+  assert(min > 0, "minimum window must be nonzero");
+  assert(min < max, "maximum window must exceed minimum");
+  assert(max <= 604800, "maximum window exceeds seven-day protocol bound");
+  minWindowSecs = min;
+  maxWindowSecs = max;
+}
