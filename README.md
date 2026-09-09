@@ -6,20 +6,6 @@ Midnight. The React and Three.js game is the runnable main example.
 
 ![The Nix-Nax lobby: a 4×4 board floating in space, red and blue stacking pieces ranged along its edges, and the menu to start a new game, join one, or practice against the AI](docs/lobby.png)
 
-## Teaching scope
-
-The lesson follows the same contract-to-client progression as the Midnight
-Bulletin Board example:
-
-| Part | Start here | What to learn |
-|---|---|---|
-| A — Contract | [`src/contract/NixNaxArena.compact`](src/contract/NixNaxArena.compact) | Public ledger state, four exported circuits, one-time action commitments, board-rule checks, witness-based player identity, and shielded rewards |
-| B — HTML + JavaScript/TypeScript | [`webapp/index.html`](webapp/index.html), [`webapp/src/wallet/`](webapp/src/wallet/), [`webapp/src/chain/`](webapp/src/chain/) | Wallet discovery, network configuration, provider construction, contract attachment, public-state reads, private-state handling, transaction submission, and confirmation |
-| C — Maintained advanced topic | [`advanced/README.md`](advanced/README.md) | A separate dispute-capable contract, SDK, and test suite with bounded deadlines, canonical proofs, and an on-chain entropy-response path |
-
-The 3D board, animation, AI policy, and game-engine implementation support the
-working application. They are deliberately outside the teaching path.
-
 ## Trust model
 
 The main contract is designed for **cooperating players**. Moves happen
