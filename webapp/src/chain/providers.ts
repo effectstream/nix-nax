@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Browser provider set for client-side midnight-js contract calls. Mirrors
 // src/sdk/providers.ts buildProviders, but swaps the Node ZK-config provider
 // (filesystem) for the browser FetchZkConfigProvider (HTTP), reading the
@@ -34,29 +38,44 @@ const ttl = () => new Date(Date.now() + CONSTANTS.TTL_DURATION_MS);
 
 // Balance + submit a midnight-js tx with the in-browser WalletFacade (same shape
 // as src/sdk/providers.ts walletAndMidnight — the wallet pays its own gas).
-function walletAndMidnight(bundle: WalletBundle): WalletProvider & MidnightProvider {
+function walletAndMidnight(
+  bundle: WalletBundle,
+  assertCurrent: () => void,
+): WalletProvider & MidnightProvider {
   return {
     getCoinPublicKey(): CoinPublicKey {
+      assertCurrent();
       return bundle.zswapSecretKeys.coinPublicKey;
     },
     getEncryptionPublicKey(): EncPublicKey {
+      assertCurrent();
       return bundle.zswapSecretKeys.encryptionPublicKey;
     },
     async balanceTx(tx: UnboundTransaction, deadline?: Date): Promise<FinalizedTransaction> {
+      assertCurrent();
       const bound = tx.bind();
       const recipe = await bundle.wallet.balanceFinalizedTransaction(
         bound,
         { shieldedSecretKeys: bundle.zswapSecretKeys, dustSecretKey: bundle.dustSecretKey },
         { ttl: deadline ?? ttl() },
       );
+      assertCurrent();
       const signed = await bundle.wallet.signRecipe(
         recipe,
         (payload) => bundle.unshieldedKeystore.signData(payload),
       );
-      return bundle.wallet.finalizeRecipe(signed);
+      assertCurrent();
+      const finalized = await bundle.wallet.finalizeRecipe(signed);
+      assertCurrent();
+      return finalized;
     },
-    submitTx(tx: FinalizedTransaction): Promise<TransactionId> {
-      return bundle.wallet.submitTransaction(tx);
+    async submitTx(tx: FinalizedTransaction): Promise<TransactionId> {
+      assertCurrent();
+      const result = await bundle.wallet.submitTransaction(tx);
+      // Submission may already have reached the node. This guard prevents a
+      // stale success path; callers must reconcile an uncertain outcome.
+      assertCurrent();
+      return result;
     },
   };
 }
@@ -67,9 +86,10 @@ export function buildBrowserProviders(opts: {
   wallet: WalletBundle;
   privateStateStoreName?: string;
   midnightDbName?: string;
+  assertCurrent?: () => void;
 }): MidnightProviders {
   assertNetworkConfigured();
-  const adapter = walletAndMidnight(opts.wallet);
+  const adapter = walletAndMidnight(opts.wallet, opts.assertCurrent ?? (() => {}));
   const store = opts.privateStateStoreName ?? "nixnax-arena";
   const zkConfigProvider = new FetchZkConfigProvider(ZK_BASE, fetch.bind(window));
   return {
@@ -98,6 +118,7 @@ export async function buildConnectorProviders(opts: {
   privateStateStoreName?: string;
   midnightDbName?: string;
   initialSecret?: Uint8Array;
+  assertCurrent?: () => void;
 }): Promise<MidnightProviders> {
   assertNetworkConfigured();
   const config = await opts.api.getConfiguration();
@@ -112,6 +133,7 @@ export async function buildConnectorProviders(opts: {
     opts.api,
     sh.shieldedCoinPublicKey,
     sh.shieldedEncryptionPublicKey,
+    opts.assertCurrent,
   );
   // Use the wallet's own endpoints so the dApp and wallet agree on the network;
   // fall back to our build-time proof server if the wallet doesn't host one.
@@ -144,4 +166,12 @@ export async function buildConnectorProviders(opts: {
     walletProvider,
     midnightProvider,
   };
+}
+
+// Public contract state does not require a wallet, proving keys, or a private
+// state store. Keeping this read path separate lets the lobby inspect saved games
+// before the player chooses a transaction wallet.
+export function buildPublicDataProvider(): ReturnType<typeof indexerPublicDataProvider> {
+  assertNetworkConfigured();
+  return indexerPublicDataProvider(NETWORK.indexer, NETWORK.indexerWS);
 }

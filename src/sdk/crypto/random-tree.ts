@@ -1,15 +1,19 @@
-// Per-player R-tree: the responder's pre-committed (random, parity-bit) per
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+// Per-player R-tree: the responder's pre-committed (random, four roll bits) per
 // (turn, slot).
 //
 // Layout — 128 turns × 16 slots = 2,048 leaves, depth-11 tree. Leaf index =
-// turn * 16 + slot. Leaf preimage: {domainSep "nixnax:rnd:", turn, slot, bit,
+// turn * 16 + slot. Leaf preimage: {domainSep "nixnax:rnd:", gameId, turn, slot, b0..b3,
 // random} where
-//   bit ∈ {0,1} — the responder's contribution to the XOR parity coin;
+//   b0..b3 ∈ {0,1} — the responder's contribution to the four-bit XOR roll;
 //   random — 32 bytes, displayed in the UI as "the turn's random value"
 //     (high entropy by itself, no extra salt needed).
 //
-// On turn t the mover reveals their I-leaf (slot s, bitI); the responder
-// reveals this tree's leaf at (t, s). parity(t) = bitI XOR bitR.
+// On turn t the mover reveals their I-leaf (slot s, bitsI); the responder
+// reveals this tree's leaf at (t, s). Each joint bit is bitsI[k] XOR bitsR[k].
 //
 // In-circuit verification: NixNaxArena.compact `randomIsUnder` (depth 11).
 

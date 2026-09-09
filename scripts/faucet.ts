@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Dev-chain faucet CLI: send NIGHT from the genesis wallet to any address —
 // e.g. a Lace/extension wallet connected to the local `undeployed` network
 // (the in-app Wallet modal has a button that does the same).

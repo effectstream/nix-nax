@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // In-browser wallets for the local `undeployed` network — they build, balance
 // (pay dust), and submit the player's on-chain txs, replacing the relay's seed
 // wallet. Two roles:

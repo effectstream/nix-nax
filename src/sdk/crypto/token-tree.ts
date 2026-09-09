@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Per-player T-tree: one-time ACTION tokens for the 4×4 stacked-pieces game.
 //
 // Layout — 128 turns × a 128-slot block per turn, depth-14 tree (16,384

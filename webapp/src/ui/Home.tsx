@@ -1,7 +1,13 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 import { useEffect, useState } from "react";
 import { api, type ContractState } from "../chain/arena.ts";
 import { generatePlayerKeys, PlayerSession } from "../game/player-session.ts";
-import { dropSession, listSessions, loadSession, saveSession, markVsAi, clearVsAi, type IndexEntry } from "../game/storage.ts";
+import { dropSession, listSessions, loadSession, isVsAi, clearVsAi, type IndexEntry } from "../game/storage.ts";
+import { createDurableGame, joinDurably, prepareJoin } from "../game/onboarding.ts";
+import { canReconnectSavedGame } from "../game/reconnect.ts";
 import { logEvent } from "../game/log-store.ts";
 import { colorOfRole } from "../game/labels.ts";
 import { submitCreateGame, submitJoin } from "../wallet/submit.ts";
@@ -102,18 +108,12 @@ export default function Home({ onOpen }: HomeProps) {
       const gidHex = hex(gameId);
       logEvent(`create-game: generating keys for ${gidHex.slice(0, 12)}…`);
       const x = generatePlayerKeys("x", gameId);
+      const xSession = new PlayerSession("x", gidHex, x, null);
       setBusy("Creating game — submitting transaction…");
       await yieldPaint();
       logEvent("create-game: submitting tx…");
-      const res = await submitCreateGame({
-        gameId: gidHex,
-        idX: hex(x.id),
-        rootX: "0x" + x.tokenTree.root.field.toString(16),
-      });
+      const res = await createDurableGame(xSession, submitCreateGame, vsAi);
       logEvent(`create-game: submitted via ${res.via}${res.txId ? ` (tx ${res.txId.slice(0, 16)}…)` : ""}`);
-      const xSession = new PlayerSession("x", gidHex, x, null);
-      saveSession(xSession.serialise());
-      if (vsAi) markVsAi(gidHex);
       logEvent(vsAi
         ? `vs-AI game ${gidHex.slice(0, 12)}… created — the AI (BLUE) will join shortly`
         : `game ${gidHex.slice(0, 12)}… created — share the game id with the BLUE player`);
@@ -135,34 +135,25 @@ export default function Home({ onOpen }: HomeProps) {
     await yieldPaint();
     try {
       const gameId = Uint8Array.from(gidHex.match(/.{2}/g)!.map((b) => parseInt(b, 16)));
-      logEvent(`join: generating keys for ${gidHex.slice(0, 12)}…`);
-      const o = generatePlayerKeys("o", gameId);
-      const myIdHex = hex(o.id);
-      // Persist O's keys BEFORE the join tx — recoverable via Reconnect if the
-      // request hangs or the tab reloads (dropped again on a front-run abort).
-      saveSession(new PlayerSession("o", gidHex, o, null).serialise());
+      const prepared = prepareJoin(gidHex, () => {
+        logEvent(`join: generating keys for ${gidHex.slice(0, 12)}…`);
+        const keys = generatePlayerKeys("o", gameId);
+        return new PlayerSession("o", gidHex, keys, null);
+      });
+      if (prepared.reused) {
+        logEvent(`join: reusing saved BLUE identity for ${gidHex.slice(0, 12)}…`);
+      }
       setBusy("Joining — submitting transaction…");
       await yieldPaint();
-      try {
-        logEvent("join: submitting tx…");
-        const r = await submitJoin({
-          gameId: gidHex,
-          idO: myIdHex,
-          rootO: "0x" + o.tokenTree.root.field.toString(16),
-        });
+      logEvent("join: submitting tx…");
+      const { result, reconciled } = await joinDurably(prepared, submitJoin, api.state);
+      if (result) {
+        const r = result;
         logEvent(`join: submitted via ${r.via}${r.txId ? ` (tx ${r.txId.slice(0, 16)}…)` : ""}`);
-      } catch (e) {
-        // Already joined? Idempotent if the chain holds OUR credentials.
-        const state = await api.state(gidHex);
-        if (state.status === 0) throw new Error(`join failed: ${(e as Error).message}`);
-        if (state.idO.toLowerCase() === myIdHex.toLowerCase()) {
-          logEvent("join: already on-chain with our credentials (idempotent)");
-        } else {
-          dropSession(gidHex, "o");
-          throw new Error("⚠️ game already joined with DIFFERENT credentials — possible front-run. Walk away.");
-        }
+      } else if (reconciled) {
+        logEvent("join: already on-chain with our saved credentials (idempotent)");
       }
-      onOpen(new PlayerSession("o", gidHex, o, null));
+      onOpen(prepared.session);
     } catch (e) {
       setError((e as Error).message);
       logEvent(`! join failed: ${(e as Error).message}`);
@@ -180,7 +171,12 @@ export default function Home({ onOpen }: HomeProps) {
 
   const reconnect = (gameId: string, role: Role) => {
     setError(null);
-    const stored = loadSession(gameId.trim().toLowerCase().replace(/^0x/, ""), role);
+    const normalized = gameId.trim().toLowerCase().replace(/^0x/, "");
+    if (!canReconnectSavedGame(relayUp, isVsAi(normalized))) {
+      setError("The multiplayer relay is offline. Saved Practice vs AI games can still be resumed.");
+      return;
+    }
+    const stored = loadSession(normalized, role);
     if (!stored) { setError(`No saved ${colorOfRole(role)} session for that game id in this browser.`); return; }
     logEvent(`reconnected ${colorOfRole(role)} session for ${gameId.slice(0, 12)}…`);
     onOpen(PlayerSession.restore(stored));
@@ -198,7 +194,7 @@ export default function Home({ onOpen }: HomeProps) {
           <h1 className="title">Nix-Nax</h1>
           <p className="muted">
             A{" "}
-            <Term word="friendly" tip="This simplified contract trusts the two players not to cheat: it still enforces every board rule and checks each move's committed token, but the anti-cheat machinery (fraud proofs, disputes, timeouts) is left out to keep it readable. The complete, fully trustless version lives at the `advanced` git tag." />{" "}
+            <Term word="friendly" tip="This simplified contract trusts the two players not to cheat: it still enforces every board rule and checks each move's committed token, but the anti-cheat machinery is left out to keep it readable. The separate advanced reference explores disputes and timeouts, but it has documented protocol limitations and is not presented as trustless." />{" "}
             game implemented in{" "}
             <Term word="Midnight" tip="A privacy-focused blockchain that runs smart contracts with zero-knowledge proofs — keeping data confidential while still publicly verifiable." />{" "}
             with{" "}
@@ -217,14 +213,14 @@ export default function Home({ onOpen }: HomeProps) {
               {relayUp === false && (
                 <p className="muted" style={{ margin: "0 0 10px", fontSize: 13 }}>
                   📡 Multiplayer relay offline — <strong>New game</strong>, <strong>Join</strong> and{" "}
-                  <strong>Reconnect</strong> need it. <strong>Practice vs AI</strong> runs fully in your browser.
+                  <strong>Reconnect</strong> for multiplayer need it. <strong>Practice vs AI</strong> and its saved games run fully in your browser.
                 </p>
               )}
               <div className="choices">
                 <button className="btn-x" disabled={relayUp === false} onClick={gated(() => newGame(false))}>New game</button>
                 <button className="btn-o" disabled={relayUp === false} onClick={gated(() => { setError(null); setView("join"); })}>Join a game</button>
                 <button className="btn-glass" onClick={gated(() => newGame(true))}>🤖 Practice vs AI</button>
-                <button className="btn-glass" disabled={relayUp === false} onClick={gated(() => { setError(null); setView("reconnect"); })}>Reconnect</button>
+                <button className="btn-glass" disabled={relayUp === false && !saved.some((entry) => isVsAi(entry.addr))} onClick={gated(() => { setError(null); setView("reconnect"); })}>Reconnect</button>
               </div>
             </>
           )}
@@ -255,7 +251,7 @@ export default function Home({ onOpen }: HomeProps) {
                       <code>{e.addr.slice(0, 14)}…{e.addr.slice(-6)}</code>
                       <div className="sub">{timeAgo(e.updatedAt)} · {states[e.addr] ?? "checking…"}</div>
                     </div>
-                    <button className="btn-glass btn-sm" onClick={() => reconnect(e.addr, e.role)}>Resume</button>
+                    <button className="btn-glass btn-sm" disabled={!canReconnectSavedGame(relayUp, isVsAi(e.addr))} onClick={() => reconnect(e.addr, e.role)}>Resume</button>
                     <button className="btn-glass btn-sm session-del" title="Remove from this browser" onClick={() => removeSession(e.addr, e.role)}>✕</button>
                   </div>
                 ))}

@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Bottom-corner turn die. Each turn the contract derives a joint random roll
 // (0..15); ODD → place ("Play"), EVEN → remove ("Remove piece").
 //   • YOUR die sits bottom-right. On a roll turn it shows "?" and you TAP IT to

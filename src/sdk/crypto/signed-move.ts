@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Off-chain messages for the 4×4 stacked-pieces game (arena edition). The
 // channelId of every message IS the gameId (32 bytes, hex-encoded) — all
 // leaf preimages bind it, so nothing replays across games.
@@ -103,6 +107,13 @@ function bitsNibble(bits: readonly number[]): number {
   return (bits[0] ?? 0) | ((bits[1] ?? 0) << 1) | ((bits[2] ?? 0) << 2) | ((bits[3] ?? 0) << 3);
 }
 
+// Compact Merkle paths are leaf-first. `goes_left=true` means the accumulated
+// digest is the left child, so that level contributes a zero position bit.
+export function merklePathPosition(path: MerklePath): number {
+  return path.path.reduce((position, entry, level) =>
+    position + (entry.goes_left ? 0 : 2 ** level), 0);
+}
+
 // ── Hash-link ───────────────────────────────────────────────────────────────
 
 export function encodeForChain(m: SignedMove): Uint8Array {
@@ -140,9 +151,10 @@ export function hashSignedMove(m: SignedMove): Uint8Array {
 
 // ── Stand-alone reveal verification (used mid-ceremony) ────────────────────
 
-// Root parameters are NULLABLE: the simplified (trusting) contract keeps no
-// Merkle roots on-chain, so a null root skips ONLY the root-membership check —
-// every other integrity check (leaf preimage, legality, hash-link) still runs.
+// Root parameters are NULLABLE: the simplified contract omits the advanced
+// I/R ceremony roots (while still committing action-token roots on-chain), so
+// a null I/R root skips ONLY this ceremony membership check. Every other
+// integrity check (leaf preimage, legality, hash-link) still runs.
 export function verifyIntent(
   it: Intent,
   expectedChannelId: string,
@@ -153,6 +165,10 @@ export function verifyIntent(
   if (it.turn !== expectedTurn) return { ok: false, reason: `intent: turn ${it.turn} != expected ${expectedTurn}` };
   if (!bitsOk(it.bits)) return { ok: false, reason: "intent: bits must be four 0/1 values" };
   if (it.slot < 0 || it.slot > 15) return { ok: false, reason: "intent: slot out of range" };
+  if (it.path.path.length !== 7) return { ok: false, reason: "intent: path must have depth 7" };
+  if (merklePathPosition(it.path) !== it.turn) {
+    return { ok: false, reason: "intent: path is not at the canonical turn position" };
+  }
   const leaf = computeIndexLeaf(gameIdOf(it.channelId), it.turn, it.slot, it.bits, it.secret);
   if (!eqBytes(leaf, it.path.leaf)) return { ok: false, reason: "intent: leaf preimage mismatch" };
   if (moverRootIdx !== null && merklePathRootField(it.path.leaf, it.path.path) !== moverRootIdx) {
@@ -173,6 +189,10 @@ export function verifyRandomReveal(
   if (r.slot !== expectedSlot) return { ok: false, reason: `random: slot ${r.slot} != expected ${expectedSlot}` };
   if (!bitsOk(r.bits)) return { ok: false, reason: "random: bits must be four 0/1 values" };
   if (r.random.length !== 32) return { ok: false, reason: "random: value must be 32 bytes" };
+  if (r.path.path.length !== 11) return { ok: false, reason: "random: path must have depth 11" };
+  if (merklePathPosition(r.path) !== r.turn * 16 + r.slot) {
+    return { ok: false, reason: "random: path is not at the canonical turn/slot position" };
+  }
   const leaf = computeRandomLeaf(gameIdOf(r.channelId), r.turn, r.slot, r.bits, r.random);
   if (!eqBytes(leaf, r.path.leaf)) return { ok: false, reason: "random: leaf preimage mismatch" };
   if (responderRootRnd !== null && merklePathRootField(r.path.leaf, r.path.path) !== responderRootRnd) {

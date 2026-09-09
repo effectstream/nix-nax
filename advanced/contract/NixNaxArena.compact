@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // NixNaxArena.compact
 // Multi-game arena for the 4x4 stacked-pieces state-channel game. ONE
 // deployment hosts ANY number of concurrent games: every ledger value is
@@ -78,6 +82,27 @@ struct RandomPreimage {
   random: Bytes<32>,
 }
 
+// A current mover can demand the responder's selected R contribution. The
+// request fixes the current turn, chosen slot and bounded response deadline.
+struct EntropyRequest {
+  turn: Uint<16>,
+  slot: Uint<8>,
+  respondBy: Uint<64>,
+}
+
+// Complete public evidence from an answered entropy request. Storing the full
+// Merkle path makes the response reusable even when relay/transaction argument
+// history is unavailable.
+struct EntropyResponse {
+  slot: Uint<8>,
+  b0: Uint<8>,
+  b1: Uint<8>,
+  b2: Uint<8>,
+  b3: Uint<8>,
+  random: Bytes<32>,
+  path: MerkleTreePath<11, Bytes<32>>,
+}
+
 // Identities + tree roots — written at createGame / joinGame, then immutable.
 struct GameKeys {
   idX: Bytes<32>,
@@ -125,6 +150,11 @@ export ledger actionLogs: Map<Bytes<32>, Map<Uint<16>, Uint<16>>>;
 // rollAnswered: turns whose roll-class challenge was answered on-chain —
 // each turn can be challenged at most once (anti-griefing).
 export ledger rollAnswered: Map<Bytes<32>, Map<Uint<16>, Boolean>>;
+// At most one responder-availability obligation can be pending per game.
+export ledger entropyRequests: Map<Bytes<32>, EntropyRequest>;
+// Availability answers are separate from rollAnswered: publishing R does not
+// prove that a later optimistic action used the truthful roll class.
+export ledger entropyResponses: Map<Bytes<32>, Map<Uint<16>, EntropyResponse>>;
 
 // Minimum challenge / timeout / response window (block-time units — seconds on
 // the live chain), fixed at deployment. Every caller-supplied deadline
@@ -133,9 +163,16 @@ export ledger rollAnswered: Map<Bytes<32>, Map<Uint<16>, Boolean>>;
 // pick a zero/instant window and skip the challenge phase. Production should set
 // a generous value (e.g. 600 = 10 min); tests deploy a small one to run fast.
 export sealed ledger minWindowSecs: Uint<64>;
+export sealed ledger maxWindowSecs: Uint<64>;
 
-constructor(minWindow: Uint<64>) {
-  minWindowSecs = disclose(minWindow);
+constructor(minWindow: Uint<64>, maxWindow: Uint<64>) {
+  const min = disclose(minWindow);
+  const max = disclose(maxWindow);
+  assert(min > 0, "minimum window must be nonzero");
+  assert(min < max, "maximum window must exceed minimum");
+  assert(max <= 604800, "maximum window exceeds seven-day protocol bound");
+  minWindowSecs = min;
+  maxWindowSecs = max;
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +241,7 @@ export circuit createGame(
   tops.insert(gid, default<Map<Uint<16>, Uint<8>>>);
   actionLogs.insert(gid, default<Map<Uint<16>, Uint<16>>>);
   rollAnswered.insert(gid, default<Map<Uint<16>, Boolean>>);
+  entropyResponses.insert(gid, default<Map<Uint<16>, EntropyResponse>>);
   reserves.insert(gid, default<Map<Uint<16>, Uint<8>>>);
   for (const s of 0..4) {
     reserves.lookup(gid).insert((4 + s) as Uint<16>, 3 as Uint<8>);  // X: 4,5,6,7
@@ -298,6 +336,13 @@ circuit indexIsUnder(
 ): Boolean {
   const leaf = indexLeaf(gid, turn, slot, b0, b1, b2, b3, secret);
   return path.leaf == leaf
+      && ((path.path[0].goes_left ? 0 : 1)
+        + (path.path[1].goes_left ? 0 : 2)
+        + (path.path[2].goes_left ? 0 : 4)
+        + (path.path[3].goes_left ? 0 : 8)
+        + (path.path[4].goes_left ? 0 : 16)
+        + (path.path[5].goes_left ? 0 : 32)
+        + (path.path[6].goes_left ? 0 : 64)) as Uint<16> == turn
       && merkleTreePathRoot<7, Bytes<32>>(path).field == root.field;
 }
 
@@ -318,6 +363,17 @@ circuit randomIsUnder(
 ): Boolean {
   const leaf = randomLeaf(gid, turn, slot, b0, b1, b2, b3, random);
   return path.leaf == leaf
+      && ((path.path[0].goes_left ? 0 : 1)
+        + (path.path[1].goes_left ? 0 : 2)
+        + (path.path[2].goes_left ? 0 : 4)
+        + (path.path[3].goes_left ? 0 : 8)
+        + (path.path[4].goes_left ? 0 : 16)
+        + (path.path[5].goes_left ? 0 : 32)
+        + (path.path[6].goes_left ? 0 : 64)
+        + (path.path[7].goes_left ? 0 : 128)
+        + (path.path[8].goes_left ? 0 : 256)
+        + (path.path[9].goes_left ? 0 : 512)
+        + (path.path[10].goes_left ? 0 : 1024)) as Uint<16> == (turn * 16 + slot) as Uint<16>
       && merkleTreePathRoot<11, Bytes<32>>(path).field == root.field;
 }
 
@@ -426,17 +482,55 @@ circuit dynWithWinner(d: GameDyn, w: Winner): GameDyn {
   };
 }
 
-// M1: a win proven by fraud proof or claimed by timeout marks the outcome
-// decided but keeps status == inProgress, so the winner can still call
-// claimResult to finalise and mint their reward. Both the timeout and challenge
-// flags are cleared — no window applies to an already-proven result, and the
-// cleared hasChallenge is what tells claimResult to skip the window check.
+// Validate a caller-supplied absolute deadline using transaction validity
+// predicates. At inclusion time: now+min < by <= now+max. Subtraction avoids
+// adding to the implicit block time, and the first guard prevents underflow.
+circuit assertBoundedDeadline(by: Uint<64>): [] {
+  assert(by >= minWindowSecs, "deadline underflow");
+  assert(blockTimeLt((by - minWindowSecs) as Uint<64>), "deadline too short");
+  // If by < max, then nonnegative block time already implies by <= now+max.
+  // Otherwise subtraction is safe and the upper bound is checked explicitly.
+  if (by >= maxWindowSecs) {
+    assert(blockTimeGte((by - maxWindowSecs) as Uint<64>), "deadline too far");
+  }
+}
+
+// Once an optimistic result has a winner, new challenges/proofs may begin only
+// before its stored cutoff. A pending challenge opened in time may finish later.
+circuit contestable(d: GameDyn): Boolean {
+  return d.winner == Winner.none
+      || (d.hasChallenge && blockTimeLt(d.challengeUntil));
+}
+
+circuit clearEntropyRequest(gid: Bytes<32>): [] {
+  if (entropyRequests.member(gid)) {
+    entropyRequests.remove(gid);
+  }
+}
+
+// A cryptographic fraud proof marks the outcome decided but keeps status ==
+// inProgress, so the winner can still call claimResult and mint. It clears all
+// optimistic challenge state because the proven outcome is terminal. Timed
+// forfeits use dynTimedDecided below and preserve prior challenge rights.
 circuit dynDecided(d: GameDyn, w: Winner): GameDyn {
   return GameDyn {
     turnMark: d.turnMark, committedTurns: d.committedTurns,
     status: Status.inProgress, winner: w,
     deadline: 0, hasDeadline: false,
     challengeUntil: 0, hasChallenge: false,
+    challengeTurn: 0, hasRollChallenge: false, respondBy: 0
+  };
+}
+
+// A timeout-style decision must not truncate the challenge window of history
+// that was accepted optimistically. It clears active liveness/dispute timers,
+// while claimResult and new proof entry points enforce the stored cutoff.
+circuit dynTimedDecided(d: GameDyn, w: Winner): GameDyn {
+  return GameDyn {
+    turnMark: d.turnMark, committedTurns: d.committedTurns,
+    status: Status.inProgress, winner: w,
+    deadline: 0, hasDeadline: false,
+    challengeUntil: d.challengeUntil, hasChallenge: d.hasChallenge,
     challengeTurn: 0, hasRollChallenge: false, respondBy: 0
   };
 }
@@ -449,10 +543,10 @@ circuit dynDecided(d: GameDyn, w: Winner): GameDyn {
 // asserts live here ONCE, so every variant is identical by construction. The
 // caller picks the best fit: settle2 for short tails (much smaller circuit →
 // much faster proof), settle11 to cut the tx count of long histories.
-// 11 is the LARGEST size the node accepts: the circuit must stay k=17 —
-// settle12 crosses into k=18 and the node rejects the call at dispatch
-// (1010 Custom(168): verification weight over the per-tx budget; a 16-slot
-// settle was measured failing the same way on node 1.0.0).
+// Historical pre-repair measurements found settle11 at k=17, while settle12
+// crossed to k=18 and a 16-slot variant exceeded node 1.0.0's transaction
+// verification budget. Those measurements do not describe this repaired
+// source; use its generated circuit metadata and current live-test evidence.
 
 // Even test for the compile-time-unrolled loop index (i is a literal after
 // monomorphization, so this folds to a constant — no circuit cost). Covers
@@ -480,6 +574,8 @@ circuit settleImpl<#N>(
   const d0 = gameState.lookup(gid);
   assert(d0.status == Status.inProgress, "game is not in progress");
   assert(d0.winner == Winner.none, "game already decided");
+  assert(!d0.hasRollChallenge, "a roll-class challenge is pending");
+  assert(!entropyRequests.member(gid), "an entropy response is pending");
   const keys = gameKeys.lookup(gid);
 
   const n = disclose(nMoves);
@@ -487,15 +583,12 @@ circuit settleImpl<#N>(
   assert(n <= N, "chunk too large");
   const base = d0.committedTurns;
   assert(base + n <= 128, "exceeds max turns");
-  // C1: the challenge window must be at least MIN_CHALLENGE_SECS in the future.
-  // Without a lower bound a settler could pass a zero/past untilTime and then
-  // finalise via claimResult in the next block, before the opponent can land a
-  // fraud proof — defeating the whole optimistic model. (Keep MIN in sync with
-  // MIN_CHALLENGE_SECS in src/sdk/game/rules.ts.)
+  // C1: the challenge window must fall inside the constructor-sealed min/max
+  // bounds. Without a lower bound a settler could pass a zero/past untilTime
+  // and finalise via claimResult in the next block, before the opponent can
+  // land a fraud proof; the upper bound prevents unfinishable games.
   const challengeEnd = disclose(untilTime);
-  const minWin = minWindowSecs;
-  assert(challengeEnd >= minWin, "challenge window underflow");
-  assert(blockTimeLt((challengeEnd - minWin) as Uint<64>), "challenge window too short");
+  assertBoundedDeadline(challengeEnd);
   const baseIsEven = isEvenTurn(base as Uint<16>);
 
   for (const i of 0..N) {
@@ -614,9 +707,9 @@ circuit settleImpl<#N>(
     hasDeadline: false,
     challengeUntil: challengeEnd,
     hasChallenge: true,
-    challengeTurn: dEnd.challengeTurn,
-    hasRollChallenge: dEnd.hasRollChallenge,
-    respondBy: dEnd.respondBy
+    challengeTurn: 0,
+    hasRollChallenge: false,
+    respondBy: 0
   });
 }
 
@@ -679,8 +772,8 @@ export circuit claimResult(gameId: Bytes<32>, recipient: ZswapCoinPublicKey): []
   // challenged mover, or claimed as a forfeit after respondBy.
   assert(!d.hasRollChallenge, "a roll-class challenge is pending");
   // Optimistic-settle wins carry an open challenge window that must close first;
-  // wins proven by a fraud proof or timeout clear hasChallenge (dynDecided) and
-  // finalise immediately, so their winner can still mint the reward (M1).
+  // cryptographic fraud proofs clear hasChallenge and finalise immediately;
+  // timed forfeits preserve any prior optimistic cutoff before reward claim.
   if (d.hasChallenge) {
     assert(blockTimeGte(d.challengeUntil), "challenge window still open");
   }
@@ -701,6 +794,7 @@ export circuit claimResult(gameId: Bytes<32>, recipient: ZswapCoinPublicKey): []
     challengeUntil: 0, hasChallenge: false,
     challengeTurn: 0, hasRollChallenge: false, respondBy: 0
   });
+  clearEntropyRequest(gid);
 
   if (decided) {
     // One stable token color for all wins (balance of it = your win count);
@@ -723,15 +817,15 @@ export circuit startTimeout(gameId: Bytes<32>, untilTime: Uint<64>): [] {
   // loser could arm+claim a timeout during the challenge window and overwrite
   // the real winner.
   assert(d.winner == Winner.none, "game already decided");
+  assert(!d.hasRollChallenge, "a roll-class challenge is pending");
+  assert(!entropyRequests.member(gid), "an entropy response is pending");
+  assert(!d.hasDeadline, "timeout already armed");
   const mark = callerMark(gid);
   assert(mark != d.turnMark, "only the waiting player can start the timeout");
-  // H1: enforce a minimum grace so the waiting player can't arm a near-instant
-  // deadline the mover has no chance to answer. (Keep MIN in sync with
-  // MIN_TIMEOUT_SECS in src/sdk/game/rules.ts.)
+  // H1: enforce the constructor-sealed grace interval so the waiting player
+  // cannot arm a near-instant deadline the mover has no chance to answer.
   const deadlineAt = disclose(untilTime);
-  const minWin = minWindowSecs;
-  assert(deadlineAt >= minWin, "timeout underflow");
-  assert(blockTimeLt((deadlineAt - minWin) as Uint<64>), "timeout too short");
+  assertBoundedDeadline(deadlineAt);
   gameState.insert(gid, GameDyn {
     turnMark: d.turnMark, committedTurns: d.committedTurns,
     status: d.status, winner: d.winner,
@@ -749,9 +843,116 @@ export circuit claimTimeout(gameId: Bytes<32>): [] {
   // H2 (defense in depth): never let a timeout claim overwrite a decided game.
   // startTimeout already blocks arming one, and settle clears hasDeadline.
   assert(d.winner == Winner.none, "game already decided");
+  assert(!d.hasRollChallenge, "a roll-class challenge is pending");
+  assert(!entropyRequests.member(gid), "an entropy response is pending");
   assert(d.hasDeadline, "no timeout has been armed");
   assert(blockTimeGte(d.deadline), "deadline has not been reached yet");
-  gameState.insert(gid, dynDecided(d, d.turnMark == 1 ? Winner.o : Winner.x));
+  gameState.insert(gid, dynTimedDecided(d, d.turnMark == 1 ? Winner.o : Winner.x));
+  clearEntropyRequest(gid);
+}
+
+// ---------------------------------------------------------------------------
+// Responder data availability: current mover request / public answer / forfeit
+// ---------------------------------------------------------------------------
+
+export circuit requestEntropy(
+  gameId: Bytes<32>,
+  slot: Uint<8>,
+  bI0: Uint<8>, bI1: Uint<8>, bI2: Uint<8>, bI3: Uint<8>,
+  secretI: Bytes<32>, pathI: MerkleTreePath<7, Bytes<32>>,
+  respondBy: Uint<64>
+): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "game is not in progress");
+  assert(d.winner == Winner.none, "game already decided");
+  assert(!d.hasRollChallenge, "a roll-class challenge is pending");
+  assert(!entropyRequests.member(gid), "an entropy request is already pending");
+
+  const t = d.committedTurns as Uint<16>;
+  assert(t > 0, "turn 0 has no randomness ceremony");
+  assert(t < 128, "turn out of range");
+  const s = disclose(slot);
+  assert(s < 16, "slot out of range");
+  assert(!entropyResponses.lookup(gid).member(t), "entropy was already published for this turn");
+
+  const me = callerMark(gid);
+  assert(me == d.turnMark, "only the current mover can request entropy");
+  if (d.hasDeadline) {
+    assert(blockTimeLt(d.deadline), "move deadline has already expired");
+  }
+
+  const i0 = disclose(bI0); const i1 = disclose(bI1); const i2 = disclose(bI2); const i3 = disclose(bI3);
+  assert(i0 <= 1 && i1 <= 1 && i2 <= 1 && i3 <= 1, "I-bits must be 0 or 1");
+  const keys = gameKeys.lookup(gid);
+  const iRoot = d.turnMark == 1 ? keys.rootIdxX : keys.rootIdxO;
+  assert(indexIsUnder(iRoot, gid, t, s, i0, i1, i2, i3, disclose(secretI), disclose(pathI)),
+         "index reveal is not the current mover's canonical I-leaf");
+
+  const by = disclose(respondBy);
+  assertBoundedDeadline(by);
+  entropyRequests.insert(gid, EntropyRequest { turn: t, slot: s, respondBy: by });
+  gameState.insert(gid, GameDyn {
+    turnMark: d.turnMark, committedTurns: d.committedTurns,
+    status: d.status, winner: d.winner,
+    deadline: 0, hasDeadline: false,
+    challengeUntil: d.challengeUntil, hasChallenge: d.hasChallenge,
+    challengeTurn: d.challengeTurn, hasRollChallenge: d.hasRollChallenge,
+    respondBy: d.respondBy
+  });
+}
+
+// Permissionless: the response is self-authenticating under the registered
+// responder root. The complete proof is retained in public ledger state.
+export circuit answerEntropy(
+  gameId: Bytes<32>,
+  bR0: Uint<8>, bR1: Uint<8>, bR2: Uint<8>, bR3: Uint<8>,
+  randomR: Bytes<32>, pathR: MerkleTreePath<11, Bytes<32>>
+): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "game is not in progress");
+  assert(d.winner == Winner.none, "game already decided");
+  assert(!d.hasRollChallenge, "a roll-class challenge is pending");
+  assert(entropyRequests.member(gid), "no entropy request is pending");
+  const req = entropyRequests.lookup(gid);
+  assert(blockTimeLt(req.respondBy), "response window has closed");
+
+  const r0 = disclose(bR0); const r1 = disclose(bR1); const r2 = disclose(bR2); const r3 = disclose(bR3);
+  assert(r0 <= 1 && r1 <= 1 && r2 <= 1 && r3 <= 1, "R-bits must be 0 or 1");
+  const keys = gameKeys.lookup(gid);
+  const rRoot = d.turnMark == 1 ? keys.rootRndO : keys.rootRndX;
+  const rr = disclose(randomR);
+  const rp = disclose(pathR);
+  assert(randomIsUnder(rRoot, gid, req.turn, req.slot, r0, r1, r2, r3, rr, rp),
+         "random reveal is not the responder's canonical R-leaf");
+
+  entropyResponses.lookup(gid).insert(req.turn, EntropyResponse {
+    slot: req.slot, b0: r0, b1: r1, b2: r2, b3: r3,
+    random: rr, path: rp
+  });
+  entropyRequests.remove(gid);
+  gameState.insert(gid, GameDyn {
+    turnMark: d.turnMark, committedTurns: d.committedTurns,
+    status: d.status, winner: d.winner,
+    deadline: 0, hasDeadline: false,
+    challengeUntil: d.challengeUntil, hasChallenge: d.hasChallenge,
+    challengeTurn: d.challengeTurn, hasRollChallenge: d.hasRollChallenge,
+    respondBy: d.respondBy
+  });
+}
+
+export circuit claimEntropyTimeout(gameId: Bytes<32>): [] {
+  const gid = disclose(gameId);
+  const d = gameState.lookup(gid);
+  assert(d.status == Status.inProgress, "game is not in progress");
+  assert(d.winner == Winner.none, "game already decided");
+  assert(!d.hasRollChallenge, "a roll-class challenge is pending");
+  assert(entropyRequests.member(gid), "no entropy request is pending");
+  const req = entropyRequests.lookup(gid);
+  assert(blockTimeGte(req.respondBy), "response window still open");
+  gameState.insert(gid, dynTimedDecided(d, d.turnMark == 1 ? Winner.x : Winner.o));
+  entropyRequests.remove(gid);
 }
 
 // ---------------------------------------------------------------------------
@@ -764,25 +965,24 @@ export circuit claimTimeout(gameId: Bytes<32>): [] {
 // responder of a committed turn demands the roll evidence on-chain; the mover
 // must answer with BOTH reveals (their own I-leaf and the responder's R-leaf).
 // A mover who skipped the ceremony never received the responder's R-leaf and
-// cannot forge it (it verifies under the responder's committed R-root), so
-// being able to answer IS proof the ceremony happened — and the answer also
-// re-derives the roll and checks it matches the claimed class. No answer by
+// cannot forge it (it verifies under the responder's committed R-root). The
+// answer proves canonical I/R evidence and re-derives the claimed class; it
+// does not prove that an off-chain ceremony occurred, because a previously
+// published entropyResponse can provide the R evidence. No answer by
 // respondBy => forfeit. Settle stays optimistic and cheap; the cost is one
 // constant-size dispute round, only when actually contested.
 //
-// Anti-abuse: each turn is answerable once (rollAnswered) so a griefer can't
-// re-challenge the same turn; one challenge pending at a time; respondBy has
-// the same minimum grace as the other windows; a pending challenge blocks
-// claimResult. Answering with a DIFFERENT leaf than the ceremony one is
-// self-defeating: it publishes a second valid leaf for that turn, which the
-// opponent slashes via the equivocation proofs.
+// Anti-abuse: each turn is answerable once (rollAnswered) so a griefer cannot
+// re-challenge the same turn; one challenge is pending at a time; respondBy is
+// bounded like the other windows; a pending challenge blocks claimResult.
+// Canonical path positions bind the I/R evidence to the challenged turn/slot.
 // ---------------------------------------------------------------------------
 
 export circuit challengeRoll(gameId: Bytes<32>, turn: Uint<16>, respondBy: Uint<64>): [] {
   const gid = disclose(gameId);
   const d = gameState.lookup(gid);
   assert(d.status == Status.inProgress, "already settled");
-  assert(d.winner == Winner.none || d.hasChallenge, "outcome no longer contestable");
+  assert(contestable(d), "outcome no longer contestable");
   assert(!d.hasRollChallenge, "a roll challenge is already pending");
   const t = disclose(turn);
   assert(t > 0, "turn 0 has no randomness ceremony");
@@ -794,16 +994,15 @@ export circuit challengeRoll(gameId: Bytes<32>, turn: Uint<16>, respondBy: Uint<
   const me = callerMark(gid);
   const moverMark = isEvenTurn(t) ? 1 as Uint<8> : 2 as Uint<8>;
   assert(me != moverMark, "only the responder of that turn can challenge");
-  // Same minimum grace as settle/startTimeout so the mover can actually answer.
-  // (Keep in sync with MIN_RESPONSE_SECS in src/sdk/game/rules.ts.)
+  // The constructor-sealed grace interval gives the mover time to answer.
   const by = disclose(respondBy);
-  const minWin = minWindowSecs;
-  assert(by >= minWin, "response window underflow");
-  assert(blockTimeLt((by - minWin) as Uint<64>), "response window too short");
+  assertBoundedDeadline(by);
+  // A valid earlier-history dispute supersedes current-turn liveness work.
+  clearEntropyRequest(gid);
   gameState.insert(gid, GameDyn {
     turnMark: d.turnMark, committedTurns: d.committedTurns,
     status: d.status, winner: d.winner,
-    deadline: d.deadline, hasDeadline: d.hasDeadline,
+    deadline: 0, hasDeadline: false,
     challengeUntil: d.challengeUntil, hasChallenge: d.hasChallenge,
     challengeTurn: t, hasRollChallenge: true, respondBy: by
   });
@@ -823,6 +1022,7 @@ export circuit answerRollChallenge(
   const d = gameState.lookup(gid);
   assert(d.status == Status.inProgress, "already settled");
   assert(d.hasRollChallenge, "no roll challenge is pending");
+  assert(blockTimeLt(d.respondBy), "response window has closed");
   assert(disclose(slot) < 16, "slot out of range");
   const t = d.challengeTurn;
   const moverIsX = isEvenTurn(t);
@@ -850,7 +1050,7 @@ export circuit answerRollChallenge(
   gameState.insert(gid, GameDyn {
     turnMark: d.turnMark, committedTurns: d.committedTurns,
     status: d.status, winner: d.winner,
-    deadline: d.deadline, hasDeadline: d.hasDeadline,
+    deadline: 0, hasDeadline: false,
     challengeUntil: d.challengeUntil, hasChallenge: d.hasChallenge,
     challengeTurn: 0, hasRollChallenge: false, respondBy: 0
   });
@@ -865,7 +1065,8 @@ export circuit claimRollChallenge(gameId: Bytes<32>): [] {
   assert(d.hasRollChallenge, "no roll challenge is pending");
   assert(blockTimeGte(d.respondBy), "response window still open");
   const moverIsX = isEvenTurn(d.challengeTurn);
-  gameState.insert(gid, dynDecided(d, moverIsX ? Winner.o : Winner.x));
+  gameState.insert(gid, dynTimedDecided(d, moverIsX ? Winner.o : Winner.x));
+  clearEntropyRequest(gid);
 }
 
 // ---------------------------------------------------------------------------
@@ -888,7 +1089,7 @@ export circuit proveWrongParity(
   // no winner yet, or an optimistic settle whose challenge window is open
   // (hasChallenge). Once a proof decides the game (dynDecided clears
   // hasChallenge) it can't be flipped again by a later proof.
-  assert(d.winner == Winner.none || d.hasChallenge, "outcome no longer contestable");
+  assert(contestable(d), "outcome no longer contestable");
   const t = disclose(turn);
   assert(t > 0, "turn 0 has no randomness ceremony");
   assert(t < 128, "turn out of range");
@@ -915,6 +1116,7 @@ export circuit proveWrongParity(
   const claimedPlaceClass = packed >= 256;
   assert(claimedPlaceClass != realPlaceClass, "claimed class matches the committed bits");
 
+  clearEntropyRequest(gid);
   gameState.insert(gid, dynDecided(d,moverIsX ? Winner.o : Winner.x));
 }
 
@@ -935,7 +1137,7 @@ export circuit proveEquivocationByX(
   // no winner yet, or an optimistic settle whose challenge window is open
   // (hasChallenge). Once a proof decides the game (dynDecided clears
   // hasChallenge) it can't be flipped again by a later proof.
-  assert(d.winner == Winner.none || d.hasChallenge, "outcome no longer contestable");
+  assert(contestable(d), "outcome no longer contestable");
   const keys = gameKeys.lookup(gid);
   assert(disclose(turn) < 128, "turn out of range");
   assert(disclose(kindA) >= 1 && disclose(kindA) <= 3 && disclose(kindB) >= 1 && disclose(kindB) <= 3,
@@ -948,6 +1150,7 @@ export circuit proveEquivocationByX(
          "token A is not a valid X token");
   assert(tokenIsUnder(keys.rootX, gid, disclose(turn), disclose(kindB), disclose(cellB), disclose(sizeB), disclose(secretB), disclose(pathB)),
          "token B is not a valid X token");
+  clearEntropyRequest(gid);
   gameState.insert(gid, dynDecided(d,Winner.o));
 }
 
@@ -964,7 +1167,7 @@ export circuit proveEquivocationByO(
   // no winner yet, or an optimistic settle whose challenge window is open
   // (hasChallenge). Once a proof decides the game (dynDecided clears
   // hasChallenge) it can't be flipped again by a later proof.
-  assert(d.winner == Winner.none || d.hasChallenge, "outcome no longer contestable");
+  assert(contestable(d), "outcome no longer contestable");
   const keys = gameKeys.lookup(gid);
   assert(disclose(turn) < 128, "turn out of range");
   assert(disclose(kindA) >= 1 && disclose(kindA) <= 3 && disclose(kindB) >= 1 && disclose(kindB) <= 3,
@@ -977,6 +1180,7 @@ export circuit proveEquivocationByO(
          "token A is not a valid O token");
   assert(tokenIsUnder(keys.rootO, gid, disclose(turn), disclose(kindB), disclose(cellB), disclose(sizeB), disclose(secretB), disclose(pathB)),
          "token B is not a valid O token");
+  clearEntropyRequest(gid);
   gameState.insert(gid, dynDecided(d,Winner.x));
 }
 
@@ -993,7 +1197,7 @@ export circuit proveIndexEquivocationByX(
   // no winner yet, or an optimistic settle whose challenge window is open
   // (hasChallenge). Once a proof decides the game (dynDecided clears
   // hasChallenge) it can't be flipped again by a later proof.
-  assert(d.winner == Winner.none || d.hasChallenge, "outcome no longer contestable");
+  assert(contestable(d), "outcome no longer contestable");
   const keys = gameKeys.lookup(gid);
   assert(disclose(turn) < 128, "turn out of range");
   assert(disclose(slotA) < 16 && disclose(slotB) < 16, "slot out of range");
@@ -1009,6 +1213,7 @@ export circuit proveIndexEquivocationByX(
          "index A is not a valid X index leaf");
   assert(indexIsUnder(keys.rootIdxX, gid, disclose(turn), disclose(slotB), disclose(b0), disclose(b1), disclose(b2), disclose(b3), disclose(secretB), disclose(pathB)),
          "index B is not a valid X index leaf");
+  clearEntropyRequest(gid);
   gameState.insert(gid, dynDecided(d,Winner.o));
 }
 
@@ -1025,7 +1230,7 @@ export circuit proveIndexEquivocationByO(
   // no winner yet, or an optimistic settle whose challenge window is open
   // (hasChallenge). Once a proof decides the game (dynDecided clears
   // hasChallenge) it can't be flipped again by a later proof.
-  assert(d.winner == Winner.none || d.hasChallenge, "outcome no longer contestable");
+  assert(contestable(d), "outcome no longer contestable");
   const keys = gameKeys.lookup(gid);
   assert(disclose(turn) < 128, "turn out of range");
   assert(disclose(slotA) < 16 && disclose(slotB) < 16, "slot out of range");
@@ -1041,6 +1246,7 @@ export circuit proveIndexEquivocationByO(
          "index A is not a valid O index leaf");
   assert(indexIsUnder(keys.rootIdxO, gid, disclose(turn), disclose(slotB), disclose(b0), disclose(b1), disclose(b2), disclose(b3), disclose(secretB), disclose(pathB)),
          "index B is not a valid O index leaf");
+  clearEntropyRequest(gid);
   gameState.insert(gid, dynDecided(d,Winner.x));
 }
 
@@ -1058,7 +1264,7 @@ export circuit proveRandomEquivocationByX(
   // no winner yet, or an optimistic settle whose challenge window is open
   // (hasChallenge). Once a proof decides the game (dynDecided clears
   // hasChallenge) it can't be flipped again by a later proof.
-  assert(d.winner == Winner.none || d.hasChallenge, "outcome no longer contestable");
+  assert(contestable(d), "outcome no longer contestable");
   const keys = gameKeys.lookup(gid);
   assert(disclose(turn) < 128, "turn out of range");
   assert(disclose(slot) < 16, "slot out of range");
@@ -1074,6 +1280,7 @@ export circuit proveRandomEquivocationByX(
          "random A is not a valid X random leaf");
   assert(randomIsUnder(keys.rootRndX, gid, disclose(turn), disclose(slot), disclose(b0), disclose(b1), disclose(b2), disclose(b3), disclose(randomB), disclose(pathB)),
          "random B is not a valid X random leaf");
+  clearEntropyRequest(gid);
   gameState.insert(gid, dynDecided(d,Winner.o));
 }
 
@@ -1091,7 +1298,7 @@ export circuit proveRandomEquivocationByO(
   // no winner yet, or an optimistic settle whose challenge window is open
   // (hasChallenge). Once a proof decides the game (dynDecided clears
   // hasChallenge) it can't be flipped again by a later proof.
-  assert(d.winner == Winner.none || d.hasChallenge, "outcome no longer contestable");
+  assert(contestable(d), "outcome no longer contestable");
   const keys = gameKeys.lookup(gid);
   assert(disclose(turn) < 128, "turn out of range");
   assert(disclose(slot) < 16, "slot out of range");
@@ -1107,5 +1314,6 @@ export circuit proveRandomEquivocationByO(
          "random A is not a valid O random leaf");
   assert(randomIsUnder(keys.rootRndO, gid, disclose(turn), disclose(slot), disclose(b0), disclose(b1), disclose(b2), disclose(b3), disclose(randomB), disclose(pathB)),
          "random B is not a valid O random leaf");
+  clearEntropyRequest(gid);
   gameState.insert(gid, dynDecided(d,Winner.x));
 }

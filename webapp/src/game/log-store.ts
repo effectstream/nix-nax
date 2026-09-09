@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Event log → browser console. The UI no longer renders a log panel; every
 // `logEvent(msg)` call across the app prints a timestamped line to the JS
 // console instead. The function name/signature is unchanged so all existing

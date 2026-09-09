@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Minimal Midnight DApp-connector surface — typed locally so we don't pull the
 // full @midnight-ntwrk/dapp-connector-api package. A wallet extension injects
 // itself at `window.midnight[rdns]`; calling `connect(networkId)` yields a
