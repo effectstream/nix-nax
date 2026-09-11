@@ -12,12 +12,12 @@
 // window — a decided game is redeemable immediately.
 
 import { useState } from "react";
-import { api } from "../chain/arena.ts";
-import type { ContractState } from "../chain/types.ts";
-import { logEvent } from "../game/log-store.ts";
-import type { PlayerSession } from "../game/player-session.ts";
-import { useWallet } from "../wallet/useWallet.ts";
-import { isConnected, openWalletModal } from "../wallet/state.ts";
+import { api } from "../../chain/arena.ts";
+import type { ContractState } from "../../chain/types.ts";
+import { logEvent } from "../../game/log-store.ts";
+import type { PlayerSession } from "../../game/player-session.ts";
+import { useWallet } from "../../wallet/useWallet.ts";
+import { isConnected, openWalletModal } from "../../wallet/state.ts";
 
 const hex = (b: Uint8Array) => Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("");
 

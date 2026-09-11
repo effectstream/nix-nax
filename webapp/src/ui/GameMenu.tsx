@@ -9,7 +9,7 @@
 import { useEffect } from "react";
 import type { ContractState } from "../chain/types.ts";
 import type { PlayerSession } from "../game/player-session.ts";
-import type { ChainActions } from "./useChainActions.ts";
+import type { ChainActions } from "./hooks/useChainActions.ts";
 import { KIND_PLACE, KIND_REMOVE } from "../../../src/sdk/game/rules.ts";
 import { colorOfRole, colorOfMark } from "../game/labels.ts";
 
