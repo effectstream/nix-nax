@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // 3D game surface — three.js. Futuristic table with a neon 4×4 grid; pieces
 // are square-based pyramids (ConeGeometry with 4 radial segments) in three
 // sizes; each player's remaining pyramids are lined up OUTSIDE the table on

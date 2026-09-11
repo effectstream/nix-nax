@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Client-side arena (contract) module — every action is built, balanced, and
 // submitted in the browser via the in-browser gas wallet (see
 // wallet/local-wallet.ts); the ZK proof itself comes from the configured proof
@@ -14,12 +18,13 @@ import { findDeployedContract } from "@midnight-ntwrk/midnight-js-contracts";
 import { encodeCoinPublicKey, rawTokenType } from "@midnight-ntwrk/compact-runtime";
 import { firstValueFrom } from "rxjs";
 import { createNixNaxPrivateState, ledger } from "../../../src/contract/index.ts";
-import { buildBrowserProviders, buildConnectorProviders } from "./providers.ts";
+import { buildBrowserProviders, buildConnectorProviders, buildPublicDataProvider } from "./providers.ts";
 import { ARENA_ADDRESS, IS_UNDEPLOYED, NETWORK_ID } from "./env.ts";
 import { makeCompiled, PRIVATE_STATE_ID } from "./compiled.ts";
 import { getGasWallet } from "../wallet/local-wallet.ts";
-import { walletApi } from "../wallet/useWallet.ts";
+import { assertActiveWallet, requireActiveWallet, walletApi, walletGeneration } from "../wallet/useWallet.ts";
 import { logEvent } from "../game/log-store.ts";
+import { GenerationTransactionQueue, type TransactionBoundary } from "../wallet/connection-lifecycle.ts";
 
 // ── Wire types ───────────────────────────────────────────────────────────────
 export type WirePath = { leaf: string; path: { sibling: string; goes_left: boolean }[] };
@@ -78,11 +83,15 @@ const txIdOf = (tx: any): string => String(tx.public.txId);
 // ── Submit serialization: one gas wallet → one nonce/UTXO stream → one queue.
 // (Matters in single-tab vs-AI where the human and the AI both submit through
 // the same wallet.)
-let queue: Promise<unknown> = Promise.resolve();
-function withLock<T>(fn: () => Promise<T>): Promise<T> {
-  const run = queue.then(fn, fn);
-  queue = run.then(() => undefined, () => undefined);
-  return run;
+const transactionQueue = new GenerationTransactionQueue();
+function withLock<T>(fn: (generation: number, assertCurrent: TransactionBoundary) => Promise<T>): Promise<T> {
+  const generation = requireActiveWallet();
+  return transactionQueue.run(
+    generation,
+    walletGeneration,
+    () => assertActiveWallet(generation),
+    (assertCurrent) => fn(generation, assertCurrent),
+  );
 }
 
 // ── Attach (lazy + cached) ──────────────────────────────────────────────────
@@ -107,44 +116,54 @@ function arenaAddress(): Promise<string> {
   return arenaAddrP;
 }
 
-// True when a browser-extension wallet is connected — route through it (it pays
-// its own gas). Otherwise use the local session/genesis wallet (undeployed dev).
-const useConnector = (): boolean => walletApi() !== null;
-
 // Build the provider set for the active wallet mode: a connected extension
 // (Lace) via the DApp-connector adapter, or the local WalletBundle.
-async function providersForMode(opts?: { privateStateStoreName?: string; midnightDbName?: string }): Promise<any> {
+async function providersForMode(
+  generation: number,
+  opts?: { privateStateStoreName?: string; midnightDbName?: string },
+): Promise<any> {
+  const assertCurrent = () => assertActiveWallet(generation);
+  assertCurrent();
   const wapi = walletApi();
-  if (wapi) return buildConnectorProviders({ api: wapi, ...opts });
+  if (wapi) {
+    const providers = await buildConnectorProviders({ api: wapi, assertCurrent, ...opts });
+    assertCurrent();
+    return providers;
+  }
   // On a hosted network the ONLY way to pay gas is a connected extension wallet
   // — fail with the actual remedy instead of the genesis wallet's error.
   if (!IS_UNDEPLOYED) {
     throw new Error(`no browser wallet connected — open Wallet (top-right) and connect one on "${NETWORK_ID}"`);
   }
   const wallet = await getGasWallet();
-  return buildBrowserProviders({ wallet, ...opts });
+  assertCurrent();
+  return buildBrowserProviders({ wallet, assertCurrent, ...opts });
 }
 
-let handleP: Promise<{ found: any; providers: any; addr: string }> | null = null;
-async function attach(): Promise<{ found: any; providers: any; addr: string }> {
-  if (handleP) return handleP;
+let handleP: { generation: number; promise: Promise<{ found: any; providers: any; addr: string }> } | null = null;
+async function attach(generation: number): Promise<{ found: any; providers: any; addr: string }> {
+  assertActiveWallet(generation);
+  if (handleP?.generation === generation) return handleP.promise;
   const p = (async () => {
-    const providers = await providersForMode();
+    const providers = await providersForMode(generation);
+    assertActiveWallet(generation);
     const addr = await arenaAddress();
+    assertActiveWallet(generation);
     const found = await findDeployedContract(providers as any, {
       contractAddress: addr,
       compiledContract: makeCompiled() as any,
       privateStateId: PRIVATE_STATE_ID as any,
       initialPrivateState: createNixNaxPrivateState(new Uint8Array(32)) as any,
     } as any);
+    assertActiveWallet(generation);
     return { found, providers, addr };
   })();
   // NEVER cache a rejection: Home polls saved sessions at page load, BEFORE a
   // wallet is connected — on a hosted network that first attach fails, and a
   // cached rejection would poison every later action (create/join after the
   // user connects). Retry fresh on the next call instead.
-  p.catch(() => { if (handleP === p) handleP = null; });
-  handleP = p;
+  p.catch(() => { if (handleP?.promise === p) handleP = null; });
+  handleP = { generation, promise: p };
   return p;
 }
 
@@ -156,9 +175,11 @@ export function resetArena(): void {
 
 // A separate handle with the caller's secret in private state — claimResult
 // consumes the localSecret witness (mirrors src/sdk/deploy.ts attachWithSecret).
-async function attachWithSecret(secret: Uint8Array): Promise<{ found: any }> {
+async function attachWithSecret(secret: Uint8Array, generation: number): Promise<{ found: any }> {
+  assertActiveWallet(generation);
   const addr = await arenaAddress();
-  const providers = await providersForMode({
+  assertActiveWallet(generation);
+  const providers = await providersForMode(generation, {
     privateStateStoreName: "nixnax-arena-secret",
     midnightDbName: "nixnax-web-db-secret",
   });
@@ -168,14 +189,15 @@ async function attachWithSecret(secret: Uint8Array): Promise<{ found: any }> {
     privateStateId: PRIVATE_STATE_ID as any,
     initialPrivateState: createNixNaxPrivateState(secret) as any,
   } as any);
+  assertActiveWallet(generation);
   return { found };
 }
 
 // ── On-chain state read ──────────────────────────────────────────────────────
 async function readState(gameId: string): Promise<ContractState> {
-  const { providers, addr } = await attach();
+  const addr = await arenaAddress();
   const g = gid(gameId);
-  const cstate = await (providers.publicDataProvider as any).queryContractState(addr);
+  const cstate = await (buildPublicDataProvider() as any).queryContractState(addr);
   if (!cstate) throw new Error("contract state not found at " + addr);
   const led: any = ledger((cstate as any).data ?? cstate);
   if (!led.gameKeys.member(g)) throw new Error("no such game");
@@ -255,14 +277,18 @@ export async function winTokenRaw(): Promise<string> {
 // the player's unrelated shielded tokens into a nonsense "wins" figure.
 export async function readWinBalance(): Promise<number> {
   try {
+    const generation = requireActiveWallet();
     let balances: Record<string, bigint>;
     const wapi = walletApi();
     if (wapi) {
       // Connected extension wallet: ask it directly for shielded balances.
       balances = await wapi.getShieldedBalances();
+      assertActiveWallet(generation);
     } else {
       const bundle = await getGasWallet();
+      assertActiveWallet(generation);
       const st: any = await firstValueFrom((bundle as any).wallet.state());
+      assertActiveWallet(generation);
       balances = st?.shielded?.balances ?? {};
     }
     const raw = await winTokenRaw();
@@ -281,8 +307,9 @@ export const api = {
   health: async (): Promise<{ ok: true; arena?: string }> => ({ ok: true, arena: await arenaAddress() }),
 
   createGame: (args: { gameId: string; idX: string; rootX: string }) =>
-    withLock(async () => {
-      const { found } = await attach();
+    withLock(async (generation, assertCurrent) => {
+      const { found } = await attach(generation);
+      assertCurrent();
       const tx = await found.callTx.createGame(
         gid(args.gameId),
         fromHex(args.idX),
@@ -292,8 +319,9 @@ export const api = {
     }),
 
   join: (args: { gameId: string; idO: string; rootO: string }) =>
-    withLock(async () => {
-      const { found } = await attach();
+    withLock(async (generation, assertCurrent) => {
+      const { found } = await attach(generation);
+      assertCurrent();
       const tx = await found.callTx.joinGame(
         gid(args.gameId),
         fromHex(args.idO),
@@ -305,11 +333,12 @@ export const api = {
   state: (gameId: string) => readState(gameId),
 
   settle: (body: SettleChunkBody) =>
-    withLock(async () => {
-      const { found } = await attach();
+    withLock(async (generation, assertCurrent) => {
+      const { found } = await attach(generation);
       if (body.kinds.length !== 8) {
         throw new Error("settle: payload arrays must have length 8");
       }
+      assertCurrent();
       const tx = await found.callTx.settle(
         gid(body.gameId),
         BigInt(body.nMoves),
@@ -323,18 +352,21 @@ export const api = {
     }),
 
   claimResult: (gameId: string, secret: string) =>
-    withLock(async () => {
+    withLock(async (generation, assertCurrent) => {
       // Attach with the caller's secret — claimResult reads the localSecret witness
       // (via callerMark) to enforce winner-only finalisation of a decided game — then
       // mint the win-token to the SUBMITTING wallet's shielded coin public key: the
       // connected extension wallet when one is active, else the local gas wallet.
       // Draws finalise with no mint; the recipient is then unused.
-      const { found } = await attachWithSecret(fromHex(secret));
+      const { found } = await attachWithSecret(fromHex(secret), generation);
+      assertCurrent();
       const wapi = walletApi();
       const coinPk = wapi
         ? (await wapi.getShieldedAddresses()).shieldedCoinPublicKey
         : ((await getGasWallet()) as any).zswapSecretKeys.coinPublicKey;
+      assertCurrent();
       const recipient = { bytes: encodeCoinPublicKey(coinPk as any) };
+      assertCurrent();
       const tx = await found.callTx.claimResult(gid(gameId), recipient);
       return { ok: true as const, txId: txIdOf(tx) };
     }),

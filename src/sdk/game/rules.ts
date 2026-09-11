@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Pure game rules for the 4×4 stacked-pieces game. No crypto, no I/O —
 // shared by the webapp UI, off-chain move verification, and tests. The
 // Compact contract implements the SAME rules in-circuit; any change here

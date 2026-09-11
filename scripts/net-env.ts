@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Shared MN_* environment resolution for the network scripts
 // (deploy-network.ts, upgrade-arena.ts): pick a network by MN_ENV, resolve
 // endpoints (with MN_*_URL overrides) and the wallet seed (MN_MNEMONIC BIP-39,

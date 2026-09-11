@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Permanent top-right wallet control (rendered at the App level, so it's on the
 // lobby and in-game alike). No game backend: every tx is built + submitted in the
 // browser (proofs come from a proof server), and gas is paid by an in-browser wallet (the genesis wallet by
@@ -5,8 +9,8 @@
 // a session wallet, funds it with NIGHT from genesis, registers it for dust, and
 // makes it the gas payer. Injected extension wallets (testnet) can also connect.
 
-import { useEffect, useRef, useState } from "react";
-import { connect, connectSessionWallet, disconnect, useWallet, isConnected, openWalletModal, closeWalletModal, listWallets, readWalletPreference, walletApi, NETWORK_ID, type InitialAPI } from "../wallet/useWallet.ts";
+import { useEffect, useState } from "react";
+import { beginWalletSelection, connect, connectSessionWallet, disconnect, finishWalletSelection, useWallet, isConnected, openWalletModal, closeWalletModal, isWalletGenerationCurrent, listWallets, readWalletPreference, walletGeneration, NETWORK_ID, type InitialAPI } from "../wallet/useWallet.ts";
 import { runFaucet, restoreSessionWallet, hasStoredSessionWallet, fundConnectedWallet, type FaucetResult } from "../wallet/faucet.ts";
 import { readWinBalance } from "../chain/arena.ts";
 
@@ -17,6 +21,8 @@ export default function WalletButton() {
   const wallet = useWallet();
   const open = wallet.modalOpen;
   const [faucetRunning, setFaucetRunning] = useState(false);
+  const [extFunding, setExtFunding] = useState(false);
+  const [restoring, setRestoring] = useState(false);
   const [faucetLog, setFaucetLog] = useState<string[]>([]);
   const [session, setSession] = useState<FaucetResult | null>(null);
   const wallets = listWallets();
@@ -43,11 +49,10 @@ export default function WalletButton() {
         ? (wallet.name ?? "Connected")
         : "Wallet";
 
-  // The player picked an extension — abandon any session-wallet restore still
-  // in flight so its late result can't seize the connection back.
-  const supersededRef = useRef(false);
   const pickWallet = async (w: InitialAPI) => {
-    supersededRef.current = true;
+    setFaucetRunning(false);
+    setExtFunding(false);
+    setRestoring(false);
     closeWalletModal();
     await connect(w);
   };
@@ -59,27 +64,30 @@ export default function WalletButton() {
   // to use their extension. An extension choice is never auto-reconnected
   // either, since that can pop the wallet's approval prompt unbidden; the
   // player clicks it, which is one click and no surprises.
-  const [restoring, setRestoring] = useState(false);
   useEffect(() => {
     if (!isLocal || connected) return;
     if (readWalletPreference() !== "local" || !hasStoredSessionWallet()) return;
     let live = true;
+    const generation = beginWalletSelection();
     setRestoring(true);
-    void restoreSessionWallet((s) => { if (live) setFaucetLog((l) => [...l.slice(-7), s]); })
+    void restoreSessionWallet((s) => {
+      if (live && isWalletGenerationCurrent(generation)) setFaucetLog((l) => [...l.slice(-7), s]);
+    })
       .then((r) => {
-        if (!live || !r) return;
+        if (!live || !r || !isWalletGenerationCurrent(generation)) return;
         // The restore takes ~30s; the player may have connected an extension
         // in the meantime. Theirs wins — just leave the funded session wallet
         // sitting there for next time.
-        if (supersededRef.current || walletApi() !== null) {
-          setFaucetLog((l) => [...l, "wallet: kept your connected wallet — the session wallet stays available"]);
-          return;
-        }
         setSession(r);
-        connectSessionWallet(r.address);
+        connectSessionWallet(r.address, generation);
       })
-      .catch((e) => { if (live) setFaucetLog((l) => [...l, "❌ " + (e as Error).message]); })
-      .finally(() => { if (live) setRestoring(false); });
+      .catch((e) => {
+        if (live && isWalletGenerationCurrent(generation)) setFaucetLog((l) => [...l, "❌ " + (e as Error).message]);
+      })
+      .finally(() => {
+        finishWalletSelection(generation);
+        if (live && isWalletGenerationCurrent(generation)) setRestoring(false);
+      });
     return () => { live = false; };
     // Mount-only: the guards above decide whether it runs at all.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -89,24 +97,35 @@ export default function WalletButton() {
   // next load connects nothing. The session wallet's seed (and its NIGHT) stays
   // in localStorage — this is "stop using it", not "throw it away".
   const doDisconnect = () => {
-    supersededRef.current = true;
     setSession(null);
     setFaucetLog([]);
+    setFaucetRunning(false);
+    setExtFunding(false);
+    setRestoring(false);
     disconnect();
   };
 
   const doFaucet = () => {
+    const generation = beginWalletSelection();
     setFaucetRunning(true);
+    setRestoring(false);
+    setExtFunding(false);
     setFaucetLog([]);
     void (async () => {
       try {
-        const r = await runFaucet((s) => setFaucetLog((l) => [...l.slice(-7), s]));
+        const r = await runFaucet((s) => {
+          if (isWalletGenerationCurrent(generation)) setFaucetLog((l) => [...l.slice(-7), s]);
+        });
+        if (!isWalletGenerationCurrent(generation)) return;
         setSession(r);
-        connectSessionWallet(r.address);
+        connectSessionWallet(r.address, generation);
       } catch (e) {
-        setFaucetLog((l) => [...l, "❌ " + (e as Error).message]);
+        if (isWalletGenerationCurrent(generation)) {
+          setFaucetLog((l) => [...l, "❌ " + (e as Error).message]);
+        }
       } finally {
-        setFaucetRunning(false);
+        finishWalletSelection(generation);
+        if (isWalletGenerationCurrent(generation)) setFaucetRunning(false);
       }
     })();
   };
@@ -114,18 +133,23 @@ export default function WalletButton() {
   // Dev-chain faucet for a CONNECTED extension wallet (e.g. Lace on
   // undeployed): sends NIGHT from genesis to its address. First run brings up
   // the genesis wallet (~30s sync).
-  const [extFunding, setExtFunding] = useState(false);
   const doFundConnected = () => {
     if (!wallet.address) return;
+    const generation = walletGeneration();
+    const address = wallet.address;
     setExtFunding(true);
     setFaucetLog([]);
     void (async () => {
       try {
-        await fundConnectedWallet(wallet.address!, (s) => setFaucetLog((l) => [...l.slice(-7), s]));
+        await fundConnectedWallet(address, (s) => {
+          if (isWalletGenerationCurrent(generation)) setFaucetLog((l) => [...l.slice(-7), s]);
+        });
       } catch (e) {
-        setFaucetLog((l) => [...l, "❌ " + (e as Error).message]);
+        if (isWalletGenerationCurrent(generation)) {
+          setFaucetLog((l) => [...l, "❌ " + (e as Error).message]);
+        }
       } finally {
-        setExtFunding(false);
+        if (isWalletGenerationCurrent(generation)) setExtFunding(false);
       }
     })();
   };
@@ -151,8 +175,9 @@ export default function WalletButton() {
             <p className="muted" style={{ marginTop: 0 }}>
               Transactions are built and submitted by your browser, and gas is paid by an
               in-browser wallet — there is no game backend. Zero-knowledge proofs are generated
-              by a <strong>proof server</strong> (your wallet's, or the one this build points at),
-              which never sees your keys.
+              by a <strong>proof server</strong> (your wallet's, or the one this build points at).
+              The prover receives the circuit's private witness inputs, but not your extension wallet's
+              seed or spending keys. Use a prover you trust, or run one locally.
             </p>
 
             {connected ? (

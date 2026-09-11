@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Network endpoints + constants.
 //
 // Defaults match the local-undeployed stack started by `bun run stack:up`:

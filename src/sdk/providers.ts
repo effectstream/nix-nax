@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Builds the 6-provider bundle that midnight-js needs.
 // Mirrors pe-bun-3's packages/chains/midnight-contracts/src/providers.ts.
 

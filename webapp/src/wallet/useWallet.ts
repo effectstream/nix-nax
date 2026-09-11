@@ -1,9 +1,14 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Connected-wallet store + React hook. A module-level store (so the dual-mode
 // Submitter and the UI share one connection) plus useSyncExternalStore.
 
 import { useSyncExternalStore } from "react";
 import { listWallets, connectWallet, hasWalletExtension, type ConnectedAPI, type InitialAPI } from "./connector.ts";
 import { logEvent } from "../game/log-store.ts";
+import { ConnectionGeneration } from "./connection-lifecycle.ts";
 
 // The dev stack runs the "undeployed" network; real envs override via
 // VITE_NETWORK_ID (see chain/env.ts). The wallet must match it to connect.
@@ -55,14 +60,51 @@ export interface WalletState {
 // module: with a plain module-level variable, an HMR update can leave the UI
 // writing the connection into one module instance while chain code reads a
 // fresh empty one — "connected" in the header, "no wallet" at submit time.
-interface WalletStore { state: WalletState; subs: Set<() => void> }
+interface WalletStore {
+  state: WalletState;
+  subs: Set<() => void>;
+  lifecycle: ConnectionGeneration;
+}
 const store: WalletStore = ((globalThis as any).__nixnaxWalletStore ??= {
   state: { mode: null, api: null, name: null, address: null, dust: null, connecting: false, modalOpen: false } as WalletState,
   subs: new Set<() => void>(),
+  lifecycle: new ConnectionGeneration(),
 });
+store.lifecycle ??= new ConnectionGeneration();
 const set = (next: Partial<WalletState>) => { store.state = { ...store.state, ...next }; for (const f of store.subs) f(); };
 
 export const walletApi = (): ConnectedAPI | null => store.state.api;
+export const walletGeneration = (): number => store.lifecycle.current;
+export const isWalletGenerationCurrent = (expected: number): boolean => store.lifecycle.isCurrent(expected);
+export const walletStateSnapshot = (): WalletState => store.state;
+
+const resetArenaSoon = () => {
+  void import("../chain/arena.ts").then((module) => module.resetArena()).catch(() => {});
+};
+
+export function beginWalletSelection(): number {
+  const generation = store.lifecycle.begin();
+  set({ mode: null, api: null, name: null, address: null, dust: null, connecting: true });
+  resetArenaSoon();
+  return generation;
+}
+
+export function finishWalletSelection(generation: number): void {
+  if (isWalletGenerationCurrent(generation)) set({ connecting: false });
+}
+
+export function assertActiveWallet(expected: number): void {
+  store.lifecycle.assertCurrent(expected);
+  if (!isConnected(store.state)) {
+    throw new Error("No wallet is connected. Open Wallet and connect before submitting a transaction.");
+  }
+}
+
+export function requireActiveWallet(): number {
+  const generation = walletGeneration();
+  assertActiveWallet(generation);
+  return generation;
+}
 
 // A gas-paying wallet is connected: an injected extension OR the local session wallet.
 export const isConnected = (s: WalletState): boolean => s.mode === "wallet" || s.mode === "local";
@@ -73,15 +115,18 @@ export function closeWalletModal(): void { set({ modalOpen: false }); }
 
 // Connect a specific browser-extension wallet → it pays the player's gas.
 export async function connect(wallet: InitialAPI): Promise<void> {
+  const generation = beginWalletSelection();
   set({ connecting: true });
   try {
     const api = await connectWallet(wallet, NETWORK_ID);
+    if (!isWalletGenerationCurrent(generation)) return;
     // ENFORCE network match: passing NETWORK_ID to connect() is only a request —
     // extensions may connect on whatever network they're set to. A wallet on a
     // different chain than the app can't fund gas or see the arena, so reject it
     // with a clear message instead of leaving a silently-broken connection.
-    const cfg = await api.getConfiguration().catch(() => null);
-    if (cfg && cfg.networkId !== NETWORK_ID) {
+    const cfg = await api.getConfiguration();
+    if (!isWalletGenerationCurrent(generation)) return;
+    if (cfg.networkId !== NETWORK_ID) {
       set({ connecting: false });
       logEvent(`! wallet on network "${cfg.networkId}" but the app is on "${NETWORK_ID}" — switch the wallet's network and reconnect`);
       return;
@@ -104,6 +149,7 @@ export async function connect(wallet: InitialAPI): Promise<void> {
       return { addr, dust };
     };
     let { addr, dust } = await readDisplayData("");
+    if (!isWalletGenerationCurrent(generation)) return;
     set({ mode: "wallet", api, name: wallet.name, address: addr?.unshieldedAddress ?? null, dust, connecting: false });
     rememberWalletPreference("extension");
     if (!addr || !dust) {
@@ -111,6 +157,7 @@ export async function connect(wallet: InitialAPI): Promise<void> {
       // connect (still unlocking/syncing).
       setTimeout(() => {
         void readDisplayData(" (retry)").then((r) => {
+          if (!isWalletGenerationCurrent(generation) || walletApi() !== api) return;
           if (r.addr || r.dust) {
             set({
               ...(r.addr ? { address: r.addr.unshieldedAddress } : {}),
@@ -123,10 +170,11 @@ export async function connect(wallet: InitialAPI): Promise<void> {
     // Drop any cached arena handle built for the previous wallet mode so the
     // next on-chain action attaches via this connection. (Dynamic import:
     // arena.ts statically imports this module — avoid the cycle.)
-    void import("../chain/arena.ts").then((m) => m.resetArena()).catch(() => {});
+    resetArenaSoon();
     logEvent(`wallet: connected ${wallet.name}${dust ? ` — dust ${dust.balance}/${dust.cap}` : ""}`);
     if (dust && dust.balance === 0n) logEvent("⚠️ wallet has 0 dust — fund it to pay for gas");
   } catch (e) {
+    if (!isWalletGenerationCurrent(generation)) return;
     set({ connecting: false });
     logEvent(`! wallet connect failed: ${(e as Error).message}`);
   }
@@ -135,16 +183,21 @@ export async function connect(wallet: InitialAPI): Promise<void> {
 // "Session Wallet + Auto Faucet" (undeployed dev): the faucet funded a per-browser
 // session wallet (or kept genesis as the dust payer) and made it the gas payer.
 // Reflect it in the shared store so the lobby knows a wallet is ready to play.
-export function connectSessionWallet(address: string): void {
+export function connectSessionWallet(address: string, generation: number): boolean {
+  if (!isWalletGenerationCurrent(generation)) return false;
   set({ mode: "local", api: null, name: "Session Wallet + Auto Faucet", address, connecting: false });
   rememberWalletPreference("local");
+  resetArenaSoon();
+  return true;
 }
 
 export function disconnect(): void {
-  set({ mode: null, api: null, name: null, address: null, dust: null });
+  store.lifecycle.begin();
+  set({ mode: null, api: null, name: null, address: null, dust: null, connecting: false });
   // Forget the choice too, or the next load would reconnect what the player
   // just walked away from.
   rememberWalletPreference(null);
+  resetArenaSoon();
   logEvent("wallet: disconnected");
 }
 

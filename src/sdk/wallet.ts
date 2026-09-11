@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Wallet bring-up for the local Midnight stack.
 //
 // Trimmed adaptation of pe-bun-3's packages/chains/midnight-contracts/src/{build-wallet,get-wallet-info}.ts —
@@ -77,7 +81,7 @@ function walletConfig(urls: NetworkUrls): DefaultConfiguration {
 
 export async function buildWallet(urls: NetworkUrls, seed: string): Promise<WalletBundle> {
   setNetworkId(urls.networkId);
-  log.info(`Building wallet (networkId=${urls.networkId}, seed=${seed.slice(0, 10)}…)`);
+  log.info(`Building wallet (networkId=${urls.networkId})`);
 
   const shieldedSeed = deriveSeedForRole(seed, Roles.Zswap);
   const dustSeed = deriveSeedForRole(seed, Roles.Dust);

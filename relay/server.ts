@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Message-only relay: a dumb WebSocket switchboard for the off-chain ceremony
 // (intent / random / move) between the two players sharing a gameId. It holds
 // NO wallet, NO contract, and NO Midnight SDK — every on-chain action now runs

@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /**
  * Upgrade a DEPLOYED NixNaxArena in place: install verifier keys for circuits
  * the deployment doesn't have yet. The arena address, all open games, and

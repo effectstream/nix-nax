@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // One-time arena deployment for the serverless (client-side) webapp.
 //
 // Deploys NixNaxArena once (or reuses the persisted deployment) using the

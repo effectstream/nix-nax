@@ -1,7 +1,10 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import wasm from "vite-plugin-wasm";
-import topLevelAwait from "vite-plugin-top-level-await";
 import { nodePolyfills } from "vite-plugin-node-polyfills";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { execSync } from "node:child_process";
@@ -71,14 +74,13 @@ export default defineConfig({
   plugins: [
     react(),
     wasm(),
-    topLevelAwait(),
     contractAssets(),
     nodePolyfills({
       globals: { Buffer: true, process: true, global: true },
       protocolImports: true,
       // The polyfills' transitive deps include CJS modules that vite can
-      // mis-interop; restrict to the few we actually need. `crypto` is handled
-      // by the alias below (crypto-browserify lacks timingSafeEqual).
+      // mis-interop; restrict to the few used by the pinned browser graph.
+      // Wallet cryptography uses Web Crypto directly; do not polyfill `crypto`.
       include: ["buffer", "process", "util", "events", "stream"],
     }),
   ],
@@ -94,11 +96,6 @@ export default defineConfig({
       "@midnight-ntwrk/zswap",
       "@midnight-ntwrk/compact-js",
     ],
-    alias: {
-      // midnight-js calls crypto.timingSafeEqual, missing from crypto-browserify.
-      crypto: fileURLToPath(new URL("./src/chain/crypto-shim.ts", import.meta.url)),
-      "node:crypto": fileURLToPath(new URL("./src/chain/crypto-shim.ts", import.meta.url)),
-    },
   },
   server: {
     port: 5173,
@@ -113,8 +110,7 @@ export default defineConfig({
     },
   },
   build: {
-    // The chain layer needs top-level await (WASM runtime init); vite's default
-    // es2020 target can't express it and the TLA plugin's lowering chokes on it.
+    // The chain layer and WASM integration need native top-level await.
     target: "esnext",
     // ledger/runtime WASM chunks are legitimately large; silence the 500k nag.
     chunkSizeWarningLimit: 4096,

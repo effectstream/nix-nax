@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Witness implementations for the NixNaxArena contract.
 //
 // The contract declares `witness localSecret(): Bytes<32>` — this is the
@@ -7,10 +11,10 @@
 // return `[newPrivateState, value]` follows the standard pattern.
 
 export type NixNaxPrivateState = {
-  // The player's 32-byte identity secret. Used to authenticate startTimeout.
-  // For settle / proveEquivocation / claimTimeout / claimResult, the payload
-  // (or on-chain state) is the authenticator, so localSecret can be a
-  // dummy value — but startTimeout requires the real one.
+  // The player's 32-byte per-game identity secret. The main contract consumes
+  // it in claimResult via callerMark, so a winner must retain the real secret
+  // to finalize and mint the reward. createGame, joinGame, and settle do not
+  // consume this witness.
   secret: Uint8Array;
 };
 

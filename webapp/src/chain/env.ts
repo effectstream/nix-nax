@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Browser-side network config, baked into the bundle at build time from
 // VITE_* variables. This replaces src/sdk/env.ts inside the webapp: that file
 // reads process.env, which is an empty polyfill in the browser, so a deployed

@@ -1,7 +1,11 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Browser-side game session for the 4×4 stacked-pieces game: identity +
 // three Merkle trees (T/I/R) + the per-turn ceremony state machine + move
-// log + verification. Talks to the chain ONLY via the relay's HTTP API;
-// this class does no network I/O itself.
+// log + verification. This class does no network I/O; the UI sends ceremony
+// messages through a relay and submits contract calls through the chain module.
 //
 // Per-turn flow (turn >= 1):
 //   my turn:    myIntent() -> [opponent's RandomReveal arrives] -> myMove()
@@ -424,9 +428,16 @@ export class PlayerSession {
   }
 
   // Their step 3: their move arrives.
-  receiveMove(m: SignedMove): { ok: true; status: "playing" | "ended" } | { ok: false; reason: string } {
+  receiveMove(m: SignedMove): { ok: true; status: "playing" | "ended"; duplicate?: boolean } | { ok: false; reason: string } {
     if (!this.opponent) return { ok: false, reason: "opponent not set" };
     const t = m.turn;
+    if (t < this.currentTurn) {
+      const prior = this.movesLog[t];
+      if (prior && bytesEq(hashSignedMove(prior), hashSignedMove(m))) {
+        return { ok: true, status: this.gameStatus, duplicate: true };
+      }
+      return { ok: false, reason: `conflicting historical move for turn ${t}` };
+    }
     if (t !== this.currentTurn) return { ok: false, reason: `expected turn ${this.currentTurn}, got ${t}` };
     if (this.nextTurnRole === this.role) return { ok: false, reason: `turn ${t} is mine, not the opponent's` };
     if (m.channelId !== this.gameId) return { ok: false, reason: "channelId mismatch" };

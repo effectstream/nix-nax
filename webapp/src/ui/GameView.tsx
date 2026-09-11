@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import Board3D, { type BoardMode } from "./Board3D.tsx";
 import GameMenu from "./GameMenu.tsx";
@@ -16,6 +20,7 @@ import {
 } from "../game/player-session.ts";
 import { saveSession, isVsAi } from "../game/storage.ts";
 import { startAiOpponent } from "../game/ai-opponent.ts";
+import { replayRecoverableMessages } from "../game/recovery.ts";
 import { nextAiThought } from "../game/ai-flavor.ts";
 import { logEvent } from "../game/log-store.ts";
 import { colorOfMark, colorOfRole } from "../game/labels.ts";
@@ -121,12 +126,12 @@ export default function GameView({ session, onLeave }: Props) {
           log(`<- intent turn=${it.turn} slot=${it.slot}`);
           try {
             const reveal = session.respondWithRandom();
+            saveSession(session.serialise());
             relayRef.current?.send({ type: "random", addr: session.gameId, payload: encodeRandomReveal(reveal) });
             log(`-> random turn=${reveal.turn} slot=${reveal.slot} value=${shortHex(reveal.random)}`);
           } catch (e) {
-            log(`! could not respond with random: ${(e as Error).message}`);
+            log(`! could not persist/respond with random: ${(e as Error).message}`);
           }
-          saveSession(session.serialise());
           force();
         }
         else if (msg.type === "random") {
@@ -136,16 +141,19 @@ export default function GameView({ session, onLeave }: Props) {
           const roll = session.rollForTurn(rv.turn);
           const cls = session.parityForTurn(rv.turn);
           log(`<- random turn=${rv.turn} value=${shortHex(rv.random)} -> roll ${roll}/${ROLL_MAX} = ${cls === 1 ? "PLACE" : "REMOVE"}`);
-          saveSession(session.serialise());
+          try { saveSession(session.serialise()); }
+          catch (e) { log(`! ${(e as Error).message}`); }
           force();
         }
         else if (msg.type === "move") {
           const m = decodeMove(msg.payload);
           const r = session.receiveMove(m);
           if (!r.ok) { log(`! received invalid move: ${r.reason}`); force(); return; }
+          if (r.duplicate) { log(`<- duplicate move turn=${m.turn} ignored (recovery replay)`); return; }
           log(`<- move turn=${m.turn} ${fmtAction({ kind: m.kind, cell: m.cell, size: m.size })} (${colorOfRole(session.role === "x" ? "o" : "x")})`);
           if (r.status === "ended") log(`local game ended — winner: ${session.winnerLocal === "draw" ? "draw" : colorOfMark(session.winnerLocal as number)}`);
-          saveSession(session.serialise());
+          try { saveSession(session.serialise()); }
+          catch (e) { log(`! ${(e as Error).message}`); }
           force();
         }
     };
@@ -157,10 +165,29 @@ export default function GameView({ session, onLeave }: Props) {
       (s) => {
         if (lastWsRef.current !== s) { lastWsRef.current = s; log(`relay: ${s}`); }
         setWsStatus(s);
+        if (s === "open") {
+          setTimeout(() => {
+            if (relayRef.current !== client || client.status !== "open") return;
+            try {
+              const replayed = replayRecoverableMessages(
+                session,
+                (message) => client.send(message),
+                () => saveSession(session.serialise()),
+              );
+              if (replayed.length) log(`relay recovery: replayed ${replayed.join(", ")}`);
+            } catch (e) {
+              log(`! relay recovery paused: ${(e as Error).message}`);
+            }
+          }, 0);
+        }
       },
     );
     relayRef.current = client;
-    return () => { handleMsgRef.current = null; client.close(); };
+    return () => {
+      handleMsgRef.current = null;
+      if (relayRef.current === client) relayRef.current = null;
+      client.close();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.gameId, session.role]);
 
@@ -213,11 +240,15 @@ export default function GameView({ session, onLeave }: Props) {
   const throwDice = () => {
     const ph = session.turnPhase;
     if (ph.phase !== "myIntent" || !session.opponentInfo || !relayRef.current) return;
-    const it = session.myIntent();
-    relayRef.current.send({ type: "intent", addr: session.gameId, payload: encodeIntent(it) });
-    log(`-> intent turn=${it.turn} slot=${it.slot} (you threw the dice)`);
-    saveSession(session.serialise());
-    force();
+    try {
+      const it = session.myIntent();
+      saveSession(session.serialise());
+      relayRef.current.send({ type: "intent", addr: session.gameId, payload: encodeIntent(it) });
+      log(`-> intent turn=${it.turn} slot=${it.slot} (you threw the dice)`);
+      force();
+    } catch (e) {
+      log(`! could not save/send intent: ${(e as Error).message}`);
+    }
   };
 
   // ── AI "thinking" copy — rotate while the local AI computes its move ───────

@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // NixNaxArena.compact — SIMPLIFIED (teaching) version.
 //
 // Multi-game arena for the 4x4 stacked-pieces game. ONE deployment hosts ANY
@@ -16,9 +20,9 @@
 //     its token + path, verified in-circuit under the mover's root;
 //   * WITNESS-based private identity (localSecret + persistentHash);
 //   * a SHIELDED win-token minted to the winner.
-// The full trustless version (three trees, equivocation slashing, the roll
-// dispute, timeout forfeits) lives in NixNaxArena.advanced.compact (and the
-// `advanced` git tag).
+// The earlier complete-protocol reference (three trees, equivocation slashing,
+// a roll dispute, and timeout forfeits) lives under advanced/. It has known
+// security and liveness defects and is not part of the default build.
 //
 // GAME RULES (mirrored in src/sdk/game/rules.ts — keep in sync):
 //   * 4x4 board; each cell stacks up to 4 layers. A piece of size s

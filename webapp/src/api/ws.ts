@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Relay WebSocket client. Reconnects with backoff. Single-room (one
 // contract address). Carries the three off-chain message types: intent,
 // random reveal, and the signed move.
@@ -36,6 +40,8 @@ export function connectRelay(
   let status: "connecting" | "open" | "closed" = "connecting";
   let intentionallyClosed = false;
   let backoff = 500;
+  let generation = 0;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
   const queue: WireOutbound[] = [];
 
   const setStatus = (s: typeof status) => {
@@ -44,36 +50,50 @@ export function connectRelay(
   };
 
   const open = () => {
+    if (intentionallyClosed) return;
+    const openGeneration = ++generation;
     setStatus("connecting");
     const proto = window.location.protocol === "https:" ? "wss" : "ws";
-    ws = new WebSocket(`${proto}://${window.location.host}/relay`);
-    ws.addEventListener("open", () => {
+    const socket = new WebSocket(`${proto}://${window.location.host}/relay`);
+    ws = socket;
+    socket.addEventListener("open", () => {
+      if (intentionallyClosed || openGeneration !== generation || ws !== socket) {
+        try { socket.close(); } catch { /* noop */ }
+        return;
+      }
       setStatus("open");
       backoff = 500;
-      ws!.send(JSON.stringify({ type: "join", addr, role } satisfies WireOutbound));
-      while (queue.length) ws!.send(JSON.stringify(queue.shift()!));
+      socket.send(JSON.stringify({ type: "join", addr, role } satisfies WireOutbound));
+      while (queue.length) socket.send(JSON.stringify(queue.shift()!));
     });
-    ws.addEventListener("message", (ev) => {
+    socket.addEventListener("message", (ev) => {
+      if (intentionallyClosed || openGeneration !== generation || ws !== socket) return;
       try {
         onMessage(JSON.parse(String(ev.data)) as WireInbound);
       } catch (e) {
         console.warn("ws parse error", e);
       }
     });
-    ws.addEventListener("close", () => {
+    socket.addEventListener("close", () => {
+      if (openGeneration !== generation || ws !== socket) return;
       setStatus("closed");
       if (intentionallyClosed) return;
-      setTimeout(open, backoff);
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        open();
+      }, backoff);
       backoff = Math.min(backoff * 2, 5000);
     });
-    ws.addEventListener("error", () => {
-      try { ws?.close(); } catch {}
+    socket.addEventListener("error", () => {
+      if (openGeneration !== generation || ws !== socket) return;
+      try { socket.close(); } catch { /* noop */ }
     });
   };
   open();
 
   return {
     send(m: WireOutbound) {
+      if (intentionallyClosed) return;
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(m));
       } else {
@@ -81,8 +101,14 @@ export function connectRelay(
       }
     },
     close() {
+      if (intentionallyClosed) return;
       intentionallyClosed = true;
+      generation++;
+      if (retryTimer !== null) clearTimeout(retryTimer);
+      retryTimer = null;
+      queue.length = 0;
       try { ws?.close(); } catch {}
+      ws = null;
       setStatus("closed");
     },
     get status() { return status; },
@@ -95,7 +121,12 @@ export function connectRelay(
 // RelayClient shape as connectRelay, so callers swap it in unchanged. Delivery
 // is async (mimics a round-trip) to avoid re-entrant sends mid session-update.
 
-type LocalEndpoint = { role: "x" | "o"; onMessage: (m: WireInbound) => void };
+type LocalEndpoint = {
+  role: "x" | "o";
+  onMessage: (m: WireInbound) => void;
+  closed: boolean;
+  deliveries: Set<ReturnType<typeof setTimeout>>;
+};
 type LocalRoom = { endpoints: Set<LocalEndpoint>; history: WireInbound[] };
 const localRooms = new Map<string, LocalRoom>();
 
@@ -106,12 +137,19 @@ export function localRelay(
   onStatus: (status: "connecting" | "open" | "closed") => void,
 ): RelayClient {
   let status: "connecting" | "open" | "closed" = "connecting";
-  const ep: LocalEndpoint = { role, onMessage };
+  const ep: LocalEndpoint = { role, onMessage, closed: false, deliveries: new Set() };
   let room = localRooms.get(addr);
   if (!room) { room = { endpoints: new Set(), history: [] }; localRooms.set(addr, room); }
   room.endpoints.add(ep);
 
-  const deliver = (to: LocalEndpoint, msg: WireInbound) => setTimeout(() => to.onMessage(msg), 0);
+  const deliver = (to: LocalEndpoint, msg: WireInbound) => {
+    if (to.closed) return;
+    const timer = setTimeout(() => {
+      to.deliveries.delete(timer);
+      if (!to.closed) to.onMessage(msg);
+    }, 0);
+    to.deliveries.add(timer);
+  };
 
   // Replay the room's prior ceremony messages to the newcomer, THEN tell existing
   // peers it joined — exactly like relay/server.ts. Without this, the side that
@@ -121,10 +159,17 @@ export function localRelay(
   for (const other of room.endpoints) {
     if (other !== ep) deliver(other, { type: "joined", addr, role });
   }
-  setTimeout(() => { status = "open"; onStatus("open"); }, 0);
+  const opened = setTimeout(() => {
+    ep.deliveries.delete(opened);
+    if (ep.closed) return;
+    status = "open";
+    onStatus("open");
+  }, 0);
+  ep.deliveries.add(opened);
 
   return {
     send(m: WireOutbound) {
+      if (ep.closed) return;
       if (m.type === "join" || m.type === "leave") return; // membership handled locally
       const r = localRooms.get(addr);
       if (!r) return;
@@ -135,6 +180,10 @@ export function localRelay(
       }
     },
     close() {
+      if (ep.closed) return;
+      ep.closed = true;
+      for (const timer of ep.deliveries) clearTimeout(timer);
+      ep.deliveries.clear();
       const r = localRooms.get(addr);
       if (r) {
         r.endpoints.delete(ep);

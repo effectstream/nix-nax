@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Shared helpers for the e2e suite.
 //
 // Tests require the local stack (node, indexer, proof-server) to be running.

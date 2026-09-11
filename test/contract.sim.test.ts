@@ -1,3 +1,7 @@
+// This file is part of effectstream/nix-nax.
+// Copyright (c) 2026 the Nix-Nax authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Contract-only simulation tests for the SIMPLIFIED (teaching) arena — drive
 // the compiled circuits in pure JS via @midnight-ntwrk/compact-runtime.
 // Covers: createGame/joinGame lifecycle + input format, game isolation,
@@ -20,7 +24,18 @@ import {
 
 import { Contract, ledger, Status, Winner } from "../src/contract/managed/contract/index.js";
 import { createWitnesses, createNixNaxPrivateState } from "../src/contract/witnesses.ts";
-import { secretFor } from "../src/sdk/crypto/token-tree.ts";
+import {
+  ACTION_BLOCK,
+  TOKEN_TREE_DEPTH,
+  TOKEN_TREE_SIZE,
+  actionOffset,
+  secretFor,
+} from "../src/sdk/crypto/token-tree.ts";
+import {
+  buildMerkleLevels,
+  computeTokenLeaf,
+  pathFromLevels,
+} from "../src/sdk/crypto/persistent-hash.ts";
 import {
   playersA,
   playersC,
@@ -52,6 +67,12 @@ const WIN_X: ScriptMove[] = [P(0, 0), P(4, 0), P(1, 0), P(5, 0), P(2, 0), P(6, 0
 const WIN_O_DIAG: ScriptMove[] = [
   P(12, 0), P(0, 0), P(13, 0), P(5, 0), P(14, 0), P(10, 0), P(4, 1), P(15, 1),
 ];
+
+const WIN_LINES = [
+  [0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11], [12, 13, 14, 15],
+  [0, 4, 8, 12], [1, 5, 9, 13], [2, 6, 10, 14], [3, 7, 11, 15],
+  [0, 5, 10, 15], [3, 6, 9, 12],
+] as const;
 
 // A 128-move draw: X places a small at cell 0; O removes it. Repeated 64
 // times the board oscillates and never lines up.
@@ -276,6 +297,31 @@ describe("settle (one-time tokens)", () => {
       contract.impureCircuits.settle(ctx, pair.gameId, c.nMoves, c.kinds, c.cells, c.sizes, c.secrets, c.paths),
     ).toThrow(/invalid one-time token/);
   });
+
+  test("a valid token and path cannot be replayed into another game", () => {
+    const target = playersA();
+    const replayed = playersC();
+    const { contract, privateState, state } = setup(target);
+    const withSecondGame = openGame(contract, state, privateState, replayed);
+    const c = packChunk(replayed, 0, [P(0, 0)]);
+    const ctx = newCircuitCtx(withSecondGame, privateState, 400);
+
+    expect(() =>
+      contract.impureCircuits.settle(
+        ctx,
+        target.gameId,
+        c.nMoves,
+        c.kinds,
+        c.cells,
+        c.sizes,
+        c.secrets,
+        c.paths,
+      ),
+    ).toThrow(/invalid one-time token/);
+
+    expect(Number(dynOf(led(withSecondGame), target).committedTurns)).toBe(0);
+    expect(Number(dynOf(led(withSecondGame), replayed).committedTurns)).toBe(0);
+  });
 });
 
 // ── Settle: happy paths ─────────────────────────────────────────────────────
@@ -308,6 +354,24 @@ describe("settle (placement + win)", () => {
     expect(Number(d.committedTurns)).toBe(8);
   });
 
+  test("all ten row, column, and diagonal win lines are detected", () => {
+    for (const [lineIndex, line] of WIN_LINES.entries()) {
+      const pair = playersC();
+      const { contract, privateState, state } = setup(pair);
+      const fillers = Array.from({ length: 16 }, (_, cell) => cell)
+        .filter((cell) => !line.includes(cell as never))
+        .slice(0, 3);
+      const moves: ScriptMove[] = [];
+      for (let i = 0; i < 4; i++) {
+        moves.push(P(line[i], i === 3 ? 1 : 0));
+        if (i < 3) moves.push(P(fillers[i], 0));
+      }
+
+      const settled = settleChunk(contract, state, privateState, pair, 0, moves);
+      expect(dynOf(led(settled), pair).winner, `win line ${lineIndex}`).toBe(Winner.x);
+    }
+  });
+
   test("chunked extension: mover alternation carries across chunks", () => {
     const pair = playersC();
     const { contract, privateState, state } = setup(pair);
@@ -329,6 +393,23 @@ describe("settle (placement + win)", () => {
     expect(() =>
       settleChunk(contract, state, privateState, pair, 0, withExtra),
     ).toThrow(/moves after game end/);
+  });
+
+  test("a rejected multi-move chunk rolls back earlier valid moves", () => {
+    const pair = playersA();
+    const { contract, privateState, state } = setup(pair);
+    const before = led(state);
+
+    expect(() =>
+      settleChunk(contract, state, privateState, pair, 0, [P(2, 0), P(2, 0)]),
+    ).toThrow(/cell occupied at target size/);
+
+    const after = led(state);
+    expect(Number(dynOf(after, pair).committedTurns)).toBe(Number(dynOf(before, pair).committedTurns));
+    expect(topAt(after, pair, 2)).toBe(0);
+    expect(boardAt(after, pair, 2 * 4)).toBe(0);
+    expect(reserveOf(after, pair, 1, 0)).toBe(3);
+    expect(reserveOf(after, pair, 2, 0)).toBe(3);
   });
 
   test("settle on a decided game rejected; empty chunk rejected", () => {
@@ -419,21 +500,64 @@ describe("settle (stacking)", () => {
   });
 
   test("remove on an empty cell / non-canonical remove rejected", () => {
-    const pair = playersA();
-    const { contract, privateState, state } = setup(pair);
+    const basePair = playersA();
+    const normal = setup(basePair);
     expect(() =>
-      settleChunk(contract, state, privateState, pair, 0, [P(0, 0), R(5)]),
+      settleChunk(normal.contract, normal.state, normal.privateState, basePair, 0, [P(0, 0), R(5)]),
     ).toThrow(/cell is empty/);
-    // A remove token always has canonical size 0, so a size!=0 remove cannot
-    // even present a valid token — the token assert fires first.
+
+    const maliciousSecret = new Uint8Array(32).fill(0xa5);
+    const maliciousTurn = 1;
+    const maliciousCell = 0;
+    const maliciousSize = 1;
+    const maliciousLeaf = computeTokenLeaf(
+      basePair.gameId,
+      maliciousTurn,
+      KIND_REMOVE,
+      maliciousCell,
+      maliciousSize,
+      maliciousSecret,
+    );
+    const leafBytes: Uint8Array[] = Array.from(
+      { length: TOKEN_TREE_SIZE },
+      () => new Uint8Array(32),
+    );
+    // A malicious player can commit a noncanonical leaf at the conventional
+    // remove slot. This keeps the proof/root valid so the contract's explicit
+    // canonical-shape assertion, rather than token verification, is exercised.
+    const maliciousIndex =
+      maliciousTurn * ACTION_BLOCK
+      + actionOffset(KIND_REMOVE, maliciousCell, maliciousSize);
+    leafBytes[maliciousIndex] = maliciousLeaf;
+    const maliciousLevels = buildMerkleLevels(leafBytes, TOKEN_TREE_DEPTH);
+    const maliciousPath = pathFromLevels(
+      maliciousLevels,
+      leafBytes,
+      maliciousIndex,
+      TOKEN_TREE_DEPTH,
+    );
+    const pair: TestPair = {
+      ...basePair,
+      o: {
+        ...basePair.o,
+        token: {
+          ...basePair.o.token,
+          root: { field: maliciousLevels[TOKEN_TREE_DEPTH][0] },
+        },
+      },
+    };
+    const { contract, privateState, state } = setup(pair);
     const c = packChunk(pair, 0, [P(0, 0)]);
-    c.kinds[1] = BigInt(KIND_REMOVE); c.cells[1] = 0n; c.sizes[1] = 1n;
-    c.secrets[1] = secretFor(pair.o.token, 1, KIND_REMOVE, 0, 0);
-    c.paths[1] = pair.o.token.pathFor(1, KIND_REMOVE, 0, 0);
+    c.nMoves = 2n;
+    c.kinds[1] = BigInt(KIND_REMOVE);
+    c.cells[1] = BigInt(maliciousCell);
+    c.sizes[1] = BigInt(maliciousSize);
+    c.secrets[1] = maliciousSecret;
+    c.paths[1] = maliciousPath;
     const ctx = newCircuitCtx(state, privateState, 960);
     expect(() =>
       contract.impureCircuits.settle(ctx, pair.gameId, 2n, c.kinds, c.cells, c.sizes, c.secrets, c.paths),
-    ).toThrow(/invalid one-time token/);
+    ).toThrow(/remove uses canonical size 0/);
   });
 
   test("pass only when nothing is removable; canonical form enforced", () => {
