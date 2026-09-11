@@ -150,10 +150,10 @@ by the wallet.
 src/contract/       Main Compact contract, witness adapter, generated bindings target
 src/sdk/            Shared commitments, rules, wallet, provider, and deployment helpers
 webapp/index.html   Browser entry document
-webapp/src/chain/   Compiled-contract adapter, providers, public reads, circuit calls
-webapp/src/wallet/  Wallet discovery, selection, balancing, signing, and submission
+webapp/src/chain/   Typed contract API, providers, public reads, calls, attachment cache
+webapp/src/wallet/  React-free wallet state, React adapter, balancing, signing, submission
 webapp/src/game/    Supporting session/game implementation (outside the lesson)
-webapp/src/ui/      Complete React/Three.js interface (outside the lesson)
+webapp/src/ui/      React/Three.js presentation plus focused integration hooks
 relay/              Bun WebSocket message relay
 test/               Contract simulator, crypto, and local-ledger tests
 advanced/           Maintained dispute-capable contract, SDK, tests, and limits

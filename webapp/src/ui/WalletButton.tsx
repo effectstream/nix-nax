@@ -2,44 +2,20 @@
 // Copyright (c) 2026 the Nix-Nax authors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-// Permanent top-right wallet control (rendered at the App level, so it's on the
-// lobby and in-game alike). No game backend: every tx is built + submitted in the
-// browser (proofs come from a proof server), and gas is paid by an in-browser wallet (the genesis wallet by
-// default). On the `undeployed` dev network, the modal offers a FAUCET that mints
-// a session wallet, funds it with NIGHT from genesis, registers it for dust, and
-// makes it the gas payer. Injected extension wallets (testnet) can also connect.
+// Permanent top-right wallet control. Wallet selection, restoration and funding
+// orchestration live in useWalletController; this component renders the control.
 
-import { useEffect, useState } from "react";
-import { beginWalletSelection, connect, connectSessionWallet, disconnect, finishWalletSelection, useWallet, isConnected, openWalletModal, closeWalletModal, isWalletGenerationCurrent, listWallets, readWalletPreference, walletGeneration, NETWORK_ID, type InitialAPI } from "../wallet/useWallet.ts";
-import { runFaucet, restoreSessionWallet, hasStoredSessionWallet, fundConnectedWallet, type FaucetResult } from "../wallet/faucet.ts";
-import { readWinBalance } from "../chain/arena.ts";
+import { useWalletController } from "./hooks/useWalletController.ts";
 
 // Long bech32 addresses → short, readable form: first 10 … last 6.
 const shortAddr = (a: string): string => (a.length <= 18 ? a : `${a.slice(0, 10)}…${a.slice(-6)}`);
 
 export default function WalletButton() {
-  const wallet = useWallet();
-  const open = wallet.modalOpen;
-  const [faucetRunning, setFaucetRunning] = useState(false);
-  const [extFunding, setExtFunding] = useState(false);
-  const [restoring, setRestoring] = useState(false);
-  const [faucetLog, setFaucetLog] = useState<string[]>([]);
-  const [session, setSession] = useState<FaucetResult | null>(null);
-  const wallets = listWallets();
-  const isLocal = NETWORK_ID === "undeployed";
-
-  const connected = isConnected(wallet);
-
-  // Win-token count for the connected wallet — read as soon as it connects,
-  // re-read when the modal opens (e.g. right after a Redeem). Only when
-  // connected: reading with no wallet would spin up the heavy local wallet.
-  const [wins, setWins] = useState<number | null>(null);
-  useEffect(() => {
-    if (!connected) { setWins(null); return; }
-    let live = true;
-    void readWinBalance().then((n) => { if (live) setWins(n); }).catch(() => {});
-    return () => { live = false; };
-  }, [connected, wallet.address, open]);
+  const {
+    wallet, open, faucetRunning, extFunding, restoring, faucetLog, session, wallets,
+    isLocal, connected, wins, pickWallet, doDisconnect, doFaucet, doFundConnected,
+    openWalletModal, closeWalletModal, hasStoredSessionWallet, NETWORK_ID,
+  } = useWalletController();
 
   const label = session
     ? shortAddr(session.address)
@@ -48,111 +24,6 @@ export default function WalletButton() {
       : connected
         ? (wallet.name ?? "Connected")
         : "Wallet";
-
-  const pickWallet = async (w: InitialAPI) => {
-    setFaucetRunning(false);
-    setExtFunding(false);
-    setRestoring(false);
-    closeWalletModal();
-    await connect(w);
-  };
-
-  // Put back the wallet the player chose LAST TIME — and only that one. With no
-  // remembered choice (first visit, or after Disconnect) nothing is connected
-  // or built: a stored seed alone is not consent, and silently spinning up the
-  // session wallet would both waste ~30s and decide for someone who came here
-  // to use their extension. An extension choice is never auto-reconnected
-  // either, since that can pop the wallet's approval prompt unbidden; the
-  // player clicks it, which is one click and no surprises.
-  useEffect(() => {
-    if (!isLocal || connected) return;
-    if (readWalletPreference() !== "local" || !hasStoredSessionWallet()) return;
-    let live = true;
-    const generation = beginWalletSelection();
-    setRestoring(true);
-    void restoreSessionWallet((s) => {
-      if (live && isWalletGenerationCurrent(generation)) setFaucetLog((l) => [...l.slice(-7), s]);
-    })
-      .then((r) => {
-        if (!live || !r || !isWalletGenerationCurrent(generation)) return;
-        // The restore takes ~30s; the player may have connected an extension
-        // in the meantime. Theirs wins — just leave the funded session wallet
-        // sitting there for next time.
-        setSession(r);
-        connectSessionWallet(r.address, generation);
-      })
-      .catch((e) => {
-        if (live && isWalletGenerationCurrent(generation)) setFaucetLog((l) => [...l, "❌ " + (e as Error).message]);
-      })
-      .finally(() => {
-        finishWalletSelection(generation);
-        if (live && isWalletGenerationCurrent(generation)) setRestoring(false);
-      });
-    return () => { live = false; };
-    // Mount-only: the guards above decide whether it runs at all.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Step away from the active wallet and forget the remembered choice, so the
-  // next load connects nothing. The session wallet's seed (and its NIGHT) stays
-  // in localStorage — this is "stop using it", not "throw it away".
-  const doDisconnect = () => {
-    setSession(null);
-    setFaucetLog([]);
-    setFaucetRunning(false);
-    setExtFunding(false);
-    setRestoring(false);
-    disconnect();
-  };
-
-  const doFaucet = () => {
-    const generation = beginWalletSelection();
-    setFaucetRunning(true);
-    setRestoring(false);
-    setExtFunding(false);
-    setFaucetLog([]);
-    void (async () => {
-      try {
-        const r = await runFaucet((s) => {
-          if (isWalletGenerationCurrent(generation)) setFaucetLog((l) => [...l.slice(-7), s]);
-        });
-        if (!isWalletGenerationCurrent(generation)) return;
-        setSession(r);
-        connectSessionWallet(r.address, generation);
-      } catch (e) {
-        if (isWalletGenerationCurrent(generation)) {
-          setFaucetLog((l) => [...l, "❌ " + (e as Error).message]);
-        }
-      } finally {
-        finishWalletSelection(generation);
-        if (isWalletGenerationCurrent(generation)) setFaucetRunning(false);
-      }
-    })();
-  };
-
-  // Dev-chain faucet for a CONNECTED extension wallet (e.g. Lace on
-  // undeployed): sends NIGHT from genesis to its address. First run brings up
-  // the genesis wallet (~30s sync).
-  const doFundConnected = () => {
-    if (!wallet.address) return;
-    const generation = walletGeneration();
-    const address = wallet.address;
-    setExtFunding(true);
-    setFaucetLog([]);
-    void (async () => {
-      try {
-        await fundConnectedWallet(address, (s) => {
-          if (isWalletGenerationCurrent(generation)) setFaucetLog((l) => [...l.slice(-7), s]);
-        });
-      } catch (e) {
-        if (isWalletGenerationCurrent(generation)) {
-          setFaucetLog((l) => [...l, "❌ " + (e as Error).message]);
-        }
-      } finally {
-        if (isWalletGenerationCurrent(generation)) setExtFunding(false);
-      }
-    })();
-  };
 
   return (
     <>
