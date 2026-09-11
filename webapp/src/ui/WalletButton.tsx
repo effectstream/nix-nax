@@ -10,7 +10,8 @@
 // makes it the gas payer. Injected extension wallets (testnet) can also connect.
 
 import { useEffect, useState } from "react";
-import { beginWalletSelection, connect, connectSessionWallet, disconnect, finishWalletSelection, useWallet, isConnected, openWalletModal, closeWalletModal, isWalletGenerationCurrent, listWallets, readWalletPreference, walletGeneration, NETWORK_ID, type InitialAPI } from "../wallet/useWallet.ts";
+import { useWallet } from "../wallet/useWallet.ts";
+import { beginWalletSelection, connect, connectSessionWallet, disconnect, finishWalletSelection, isConnected, openWalletModal, closeWalletModal, isWalletGenerationCurrent, listWallets, readWalletPreference, walletGeneration, NETWORK_ID, type InitialAPI } from "../wallet/state.ts";
 import { runFaucet, restoreSessionWallet, hasStoredSessionWallet, fundConnectedWallet, type FaucetResult } from "../wallet/faucet.ts";
 import { readWinBalance } from "../chain/arena.ts";
 

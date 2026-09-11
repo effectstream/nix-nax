@@ -14,7 +14,7 @@ import { MidnightBech32m, UnshieldedAddress } from "@midnight-ntwrk/wallet-sdk-a
 import { NETWORK, NETWORK_ID, IS_UNDEPLOYED } from "../chain/env.ts";
 import { buildWallet, waitForFunds, registerNightForDust, type WalletBundle } from "../../../src/sdk/wallet.ts";
 import { getGenesisWalletWithFunds, setGasWallet } from "./local-wallet.ts";
-import { resetArena } from "../chain/arena.ts";
+import { invalidateArenaAttachment } from "../chain/attachment-cache.ts";
 import { logEvent } from "../game/log-store.ts";
 
 const SESSION_SEED_KEY = "nixnax:session-wallet-seed";
@@ -127,7 +127,7 @@ export async function restoreSessionWallet(log: (s: string) => void = logEvent):
 
   if (funds.dust > 0n) {
     setGasWallet(session);
-    resetArena();
+    invalidateArenaAttachment();
     log(`wallet: already funded (dust ${funds.dust}) — skipping the faucet`);
     return { address: session.unshieldedAddress, unshielded: funds.unshielded, dust: funds.dust, alreadyFunded: true };
   }
@@ -149,7 +149,7 @@ export async function runFaucet(log: (s: string) => void = logEvent): Promise<Fa
 
   if (funds.dust > 0n) {
     setGasWallet(session);
-    resetArena();
+    invalidateArenaAttachment();
     log("faucet: session already funded + generating dust — set as gas wallet");
     return { address: session.unshieldedAddress, unshielded: funds.unshielded, dust: funds.dust, alreadyFunded: true };
   }
@@ -199,7 +199,7 @@ export async function runFaucet(log: (s: string) => void = logEvent): Promise<Fa
     return { address: session.unshieldedAddress, unshielded: funds.unshielded, dust: 0n, alreadyFunded: false };
   }
   setGasWallet(session);
-  resetArena();
+  invalidateArenaAttachment();
   funds = await waitForFunds(session, { requireShielded: false });
   log(`faucet: ✅ session ready — dust ${funds.dust}; now the gas wallet`);
   return { address: session.unshieldedAddress, unshielded: funds.unshielded, dust: funds.dust, alreadyFunded: false };

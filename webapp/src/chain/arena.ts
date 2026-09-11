@@ -22,49 +22,16 @@ import { buildBrowserProviders, buildConnectorProviders, buildPublicDataProvider
 import { ARENA_ADDRESS, IS_UNDEPLOYED, NETWORK_ID } from "./env.ts";
 import { makeCompiled, PRIVATE_STATE_ID } from "./compiled.ts";
 import { getGasWallet } from "../wallet/local-wallet.ts";
-import { assertActiveWallet, requireActiveWallet, walletApi, walletGeneration } from "../wallet/useWallet.ts";
+import { assertActiveWallet, requireActiveWallet, walletApi, walletGeneration } from "../wallet/state.ts";
 import { logEvent } from "../game/log-store.ts";
 import { GenerationTransactionQueue, type TransactionBoundary } from "../wallet/connection-lifecycle.ts";
+import { arenaAttachment, invalidateArenaAttachment } from "./attachment-cache.ts";
+import { decodePath, fromHex, toHex } from "../../../src/sdk/game/messaging.ts";
+import type { ArenaApi, ArenaAttachment, ArenaFoundContract, ArenaProviders, ContractState, NixNaxContract, SettleChunkBody } from "./types.ts";
 
-// ── Wire types ───────────────────────────────────────────────────────────────
-export type WirePath = { leaf: string; path: { sibling: string; goes_left: boolean }[] };
-
-export interface ContractState {
-  ok: true;
-  gameId: string;
-  status: number;
-  statusName: "halfOpen" | "inProgress" | "settled";
-  winner: number;
-  winnerName: "none" | "x" | "o" | "draw";
-  idX: string;
-  idO: string;
-  rootX: string;
-  rootO: string;
-  committedTurns: number;
-  turnMark: number;
-  board: number[];
-  tops: number[];
-  reserves: Record<string, number>;
-  actionLog: { turn: number; packed: number }[];
-}
-
-export interface SettleChunkBody {
-  gameId: string;
-  nMoves: number;
-  kinds: number[];   // padded to 8
-  cells: number[];
-  sizes: number[];
-  secrets: string[]; // per-move token secrets (hex), zero-padded
-  paths: WirePath[]; // per-move token Merkle paths, zero-padded
-}
+export type { ArenaApi, ContractState, CreateGameArgs, CreateGameResult, JoinGameArgs, SettleChunkBody, TransactionResult, WirePath } from "./types.ts";
 
 // ── Codecs ───────────────────────────────────────────────────────────────────
-const fromHex = (s: string): Uint8Array => {
-  const h = (s.startsWith("0x") ? s.slice(2) : s).match(/.{1,2}/g) ?? [];
-  return new Uint8Array(h.map((b) => parseInt(b, 16)));
-};
-const toHex = (b: Uint8Array): string =>
-  Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("");
 const fieldBig = (v: string | number | bigint): bigint => BigInt(v);
 const gid = (s: string): Uint8Array => {
   const b = fromHex(s);
@@ -72,13 +39,7 @@ const gid = (s: string): Uint8Array => {
   return b;
 };
 const toBig = (xs: number[]) => xs.map((v) => BigInt(v));
-function decodePath(p: WirePath): { leaf: Uint8Array; path: { sibling: { field: bigint }; goes_left: boolean }[] } {
-  return {
-    leaf: fromHex(p.leaf),
-    path: p.path.map((e) => ({ sibling: { field: BigInt(e.sibling) }, goes_left: e.goes_left })),
-  };
-}
-const txIdOf = (tx: any): string => String(tx.public.txId);
+const txIdOf = (tx: { public: { txId: unknown } }): string => String(tx.public.txId);
 
 // ── Submit serialization: one gas wallet → one nonce/UTXO stream → one queue.
 // (Matters in single-tab vs-AI where the human and the AI both submit through
@@ -121,7 +82,7 @@ function arenaAddress(): Promise<string> {
 async function providersForMode(
   generation: number,
   opts?: { privateStateStoreName?: string; midnightDbName?: string },
-): Promise<any> {
+): Promise<ArenaProviders> {
   const assertCurrent = () => assertActiveWallet(generation);
   assertCurrent();
   const wapi = walletApi();
@@ -140,16 +101,14 @@ async function providersForMode(
   return buildBrowserProviders({ wallet, assertCurrent, ...opts });
 }
 
-let handleP: { generation: number; promise: Promise<{ found: any; providers: any; addr: string }> } | null = null;
-async function attach(generation: number): Promise<{ found: any; providers: any; addr: string }> {
+async function attach(generation: number): Promise<ArenaAttachment> {
   assertActiveWallet(generation);
-  if (handleP?.generation === generation) return handleP.promise;
-  const p = (async () => {
+  return arenaAttachment(generation, async () => {
     const providers = await providersForMode(generation);
     assertActiveWallet(generation);
     const addr = await arenaAddress();
     assertActiveWallet(generation);
-    const found = await findDeployedContract(providers as any, {
+    const found = await findDeployedContract<NixNaxContract>(providers, {
       contractAddress: addr,
       compiledContract: makeCompiled() as any,
       privateStateId: PRIVATE_STATE_ID as any,
@@ -157,25 +116,18 @@ async function attach(generation: number): Promise<{ found: any; providers: any;
     } as any);
     assertActiveWallet(generation);
     return { found, providers, addr };
-  })();
-  // NEVER cache a rejection: Home polls saved sessions at page load, BEFORE a
-  // wallet is connected — on a hosted network that first attach fails, and a
-  // cached rejection would poison every later action (create/join after the
-  // user connects). Retry fresh on the next call instead.
-  p.catch(() => { if (handleP?.promise === p) handleP = null; });
-  handleP = { generation, promise: p };
-  return p;
+  });
 }
 
 // Drop the cached handle so the next action re-attaches — e.g. after the faucet
 // swaps the active gas wallet (setGasWallet) to a funded session wallet.
 export function resetArena(): void {
-  handleP = null;
+  invalidateArenaAttachment();
 }
 
 // A separate handle with the caller's secret in private state — claimResult
 // consumes the localSecret witness (mirrors src/sdk/deploy.ts attachWithSecret).
-async function attachWithSecret(secret: Uint8Array, generation: number): Promise<{ found: any }> {
+async function attachWithSecret(secret: Uint8Array, generation: number): Promise<{ found: ArenaFoundContract }> {
   assertActiveWallet(generation);
   const addr = await arenaAddress();
   assertActiveWallet(generation);
@@ -183,7 +135,7 @@ async function attachWithSecret(secret: Uint8Array, generation: number): Promise
     privateStateStoreName: "nixnax-arena-secret",
     midnightDbName: "nixnax-web-db-secret",
   });
-  const found = await findDeployedContract(providers as any, {
+  const found = await findDeployedContract<NixNaxContract>(providers, {
     contractAddress: addr,
     compiledContract: makeCompiled() as any,
     privateStateId: PRIVATE_STATE_ID as any,
@@ -303,7 +255,7 @@ export async function readWinBalance(): Promise<number> {
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
-export const api = {
+export const api: ArenaApi = {
   health: async (): Promise<{ ok: true; arena?: string }> => ({ ok: true, arena: await arenaAddress() }),
 
   createGame: (args: { gameId: string; idX: string; rootX: string }) =>

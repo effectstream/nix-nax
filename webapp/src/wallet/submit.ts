@@ -7,20 +7,18 @@
 // in-browser gas wallet (see chain/arena.ts + wallet/local-wallet.ts) — no relay.
 
 import { api } from "../chain/arena.ts";
+import type { CreateGameArgs, JoinGameArgs } from "../chain/types.ts";
 import { logEvent } from "../game/log-store.ts";
 
 export type SubmitResult = { via: "local"; txId?: string };
 
-type CreateArgs = { gameId: string; idX: string; rootX: string };
-type JoinArgs = { gameId: string; idO: string; rootO: string };
-
-export async function submitCreateGame(args: CreateArgs): Promise<SubmitResult> {
+export async function submitCreateGame(args: CreateGameArgs): Promise<SubmitResult> {
   const res = await api.createGame(args);
   logEvent("create-game: built + proven + submitted in-browser (you paid the gas)");
   return { via: "local", txId: res.txId };
 }
 
-export async function submitJoin(args: JoinArgs): Promise<SubmitResult> {
+export async function submitJoin(args: JoinGameArgs): Promise<SubmitResult> {
   const res = await api.join(args);
   logEvent("join: built + proven + submitted in-browser (you paid the gas)");
   return { via: "local", txId: res.txId };

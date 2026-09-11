@@ -21,7 +21,6 @@ import type {
 } from "@midnight-ntwrk/ledger-v8";
 import type {
   MidnightProvider,
-  MidnightProviders,
   UnboundTransaction,
   WalletProvider,
 } from "@midnight-ntwrk/midnight-js-types";
@@ -33,6 +32,7 @@ import { ZK_ASSETS_BASE } from "./compiled.ts";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import type { ConnectedAPI } from "../wallet/connector.ts";
 import { createConnectorWalletProviders } from "../wallet/connector-adapter.ts";
+import type { ArenaProviders } from "./types.ts";
 
 const ttl = () => new Date(Date.now() + CONSTANTS.TTL_DURATION_MS);
 
@@ -87,7 +87,7 @@ export function buildBrowserProviders(opts: {
   privateStateStoreName?: string;
   midnightDbName?: string;
   assertCurrent?: () => void;
-}): MidnightProviders {
+}): ArenaProviders {
   assertNetworkConfigured();
   const adapter = walletAndMidnight(opts.wallet, opts.assertCurrent ?? (() => {}));
   const store = opts.privateStateStoreName ?? "nixnax-arena";
@@ -105,7 +105,7 @@ export function buildBrowserProviders(opts: {
     proofProvider: httpClientProofProvider(NETWORK.proofServer, zkConfigProvider as any),
     walletProvider: adapter,
     midnightProvider: adapter,
-  };
+  } as ArenaProviders;
 }
 
 // Provider set backed by a connected DApp-connector wallet (e.g. Lace). Mirrors
@@ -119,7 +119,7 @@ export async function buildConnectorProviders(opts: {
   midnightDbName?: string;
   initialSecret?: Uint8Array;
   assertCurrent?: () => void;
-}): Promise<MidnightProviders> {
+}): Promise<ArenaProviders> {
   assertNetworkConfigured();
   const config = await opts.api.getConfiguration();
   // The local-wallet path sets this inside buildWallet(); the connector path
@@ -165,7 +165,7 @@ export async function buildConnectorProviders(opts: {
     proofProvider: httpClientProofProvider(config.proverServerUri || NETWORK.proofServer, zkConfigProvider as any),
     walletProvider,
     midnightProvider,
-  };
+  } as ArenaProviders;
 }
 
 // Public contract state does not require a wallet, proving keys, or a private

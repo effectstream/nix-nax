@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 import { useEffect, useState } from "react";
-import { api, type ContractState } from "../chain/arena.ts";
+import { api } from "../chain/arena.ts";
+import type { ContractState } from "../chain/types.ts";
 import { generatePlayerKeys, PlayerSession } from "../game/player-session.ts";
 import { dropSession, listSessions, loadSession, isVsAi, clearVsAi, type IndexEntry } from "../game/storage.ts";
 import { createDurableGame, joinDurably, prepareJoin } from "../game/onboarding.ts";
@@ -14,7 +15,8 @@ import { submitCreateGame, submitJoin } from "../wallet/submit.ts";
 import Board3D from "./Board3D.tsx";
 import { emptyBoard, fullReserves } from "../../../src/sdk/game/rules.ts";
 import { randomGameId } from "../../../src/sdk/crypto/persistent-hash.ts";
-import { useWallet, isConnected, openWalletModal } from "../wallet/useWallet.ts";
+import { useWallet } from "../wallet/useWallet.ts";
+import { isConnected, openWalletModal } from "../wallet/state.ts";
 import { pingRelay } from "../api/ws.ts";
 
 export interface HomeProps {

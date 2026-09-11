@@ -23,7 +23,7 @@ import {
   finishWalletSelection,
   walletApi,
   walletStateSnapshot,
-} from "../src/wallet/useWallet.ts";
+} from "../src/wallet/state.ts";
 
 class MemoryStorage {
   values = new Map<string, string>();

@@ -7,7 +7,8 @@ import Board3D, { type BoardMode } from "./Board3D.tsx";
 import GameMenu from "./GameMenu.tsx";
 import TurnDie, { type DieTarget } from "./TurnDie.tsx";
 import { useChainActions } from "./useChainActions.ts";
-import { api, readWinBalance, type ContractState } from "../chain/arena.ts";
+import { api, readWinBalance } from "../chain/arena.ts";
+import type { ContractState } from "../chain/types.ts";
 import { connectRelay, localRelay, type RelayClient } from "../api/ws.ts";
 import {
   PlayerSession,

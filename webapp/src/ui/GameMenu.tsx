@@ -7,7 +7,7 @@
 // backdrop click, ✕, or Esc.
 
 import { useEffect } from "react";
-import type { ContractState } from "../chain/arena.ts";
+import type { ContractState } from "../chain/types.ts";
 import type { PlayerSession } from "../game/player-session.ts";
 import type { ChainActions } from "./useChainActions.ts";
 import { KIND_PLACE, KIND_REMOVE } from "../../../src/sdk/game/rules.ts";
