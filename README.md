@@ -15,6 +15,11 @@ batches through a wallet to Midnight, where the Compact contract validates and
 settles them. An on-chain claim finalizes the result and mints a shielded win
 token when there is a winner.
 
+This design aims for millisecond-scale multiplayer interaction while keeping
+batched moves verifiable on-chain. Sending each move as a separate on-chain
+transaction would make turns wait for proving and confirmation, which can take
+several seconds or longer.
+
 - Play a complete two-player stacking game or practise against the local AI.
 - Create and join games, submit settlements, and claim results through a browser
   wallet.
