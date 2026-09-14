@@ -4,6 +4,17 @@ Nix-Nax is a browser game that demonstrates a Compact contract and
 wallet-driven chain interaction on Midnight. The React and Three.js game is
 the runnable main example.
 
+RED and BLUE take turns on a 4×4 board, aiming to show four visible top pieces
+of their color in a row, column, or diagonal. The first turn places a piece; on
+later turns a joint die roll determines whether to place or remove. A larger
+piece can cover a smaller one of either color, and a remove turn can take the
+visible top piece of either color.
+
+Players exchange live moves and dice information off-chain. They submit move
+batches through a wallet to Midnight, where the Compact contract validates and
+settles them. An on-chain claim finalizes the result and mints a shielded win
+token when there is a winner.
+
 - Play a complete two-player stacking game or practise against the local AI.
 - Create and join games, submit settlements, and claim results through a browser
   wallet.
